@@ -161,20 +161,20 @@ class ResultRow:                  # one JSON line in results/*.jsonl
 
 The midterm is behind us, so the original pilot window is gone; this is the compressed schedule. Thanksgiving is Nov 26.
 
-| Date           | Milestone                                                                                                           | Owner(s)   |
-| -------------- | ------------------------------------------------------------------------------------------------------------------- | ---------- |
-| **Sun Nov 22** | Repo up, `schema.py` + this README merged, roles confirmed                                                          | all        |
-| Mon Nov 23     | `serial` mode + T1/T2 loaders running end-to-end; shared-memory runner skeleton                                     | B, Richard |
-| **Tue Nov 24** | **Pilot gate:** `hogwild` on T1 and T2 at m = 4 with τ logged; serial reference curves + tuned η for all four tasks | Richard, B |
-| Wed Nov 25     | `sync` + `backup` modes pass the same smoke test; sweep driver runs E1 for T1; VM provisioned                       | C          |
-| Thu Nov 26     | E1 runs unattended on the VM (Thanksgiving — nobody babysits it)                                                    | C          |
-| Fri Nov 27     | E2 + E3 launched; first E1 plots from partial results; report skeleton with figure placeholders                     | C, D       |
-| Sat Nov 28     | E4 + reruns of anything that failed; all raw results in `results/` by midnight                                      | C          |
-| **Sun Nov 29** | **Results freeze.** Final figures, bound check done                                                                 | D          |
-| Mon Nov 30     | **Report draft complete**, every section owner has written theirs; one full read by someone else                    | all        |
-| Tue Dec 1      | Slides done, dry run on Zoom, timing checked (10 min + Q&A)                                                         | all        |
-| Wed Dec 2      | Record presentation; report final pass + contribution statement                                                     | all        |
-| **Thu Dec 3**  | **Upload recording + report to Bruinlearn**                                                                         | Richard    |
+| Date           | Milestone                                                                                                           | Owner(s)        |
+| -------------- | ------------------------------------------------------------------------------------------------------------------- | --------------- |
+| **Sun Nov 22** | Repo up, `schema.py` + this README merged, roles confirmed                                                          | all             |
+| Mon Nov 23     | `serial` mode + T1/T2 loaders running end-to-end; shared-memory runner skeleton                                     | Andrew, Richard |
+| **Tue Nov 24** | **Pilot gate:** `hogwild` on T1 and T2 at m = 4 with τ logged; serial reference curves + tuned η for all four tasks | Richard, Andrew |
+| Wed Nov 25     | `sync` + `backup` modes pass the same smoke test; sweep driver runs E1 for T1; VM provisioned                       | C               |
+| Thu Nov 26     | E1 runs unattended on the VM (Thanksgiving — nobody babysits it)                                                    | C               |
+| Fri Nov 27     | E2 + E3 launched; first E1 plots from partial results; report skeleton with figure placeholders                     | C, D            |
+| Sat Nov 28     | E4 + reruns of anything that failed; all raw results in `results/` by midnight                                      | C               |
+| **Sun Nov 29** | **Results freeze.** Final figures, bound check done                                                                 | D               |
+| Mon Nov 30     | **Report draft complete**, every section owner has written theirs; one full read by someone else                    | all             |
+| Tue Dec 1      | Slides done, dry run on Zoom, timing checked (10 min + Q&A)                                                         | all             |
+| Wed Dec 2      | Record presentation; report final pass + contribution statement                                                     | all             |
+| **Thu Dec 3**  | **Upload recording + report to Bruinlearn**                                                                         | Richard         |
 
 Daily: 15-min sync at 9 pm PT on Discord. Blockers go in the channel immediately, not at the sync.
 
@@ -182,7 +182,7 @@ Daily: 15-min sync at 9 pm PT on Discord. Blockers go in the channel immediately
 
 ## 8. Work allocation
 
-Each stream has one owner who is accountable for its deliverable and its report section. Pairs review each other's PRs (Richard ↔ C, B ↔ D).
+Each stream has one owner who is accountable for its deliverable and its report section. Pairs review each other's PRs (Richard ↔ C, Andrew ↔ D).
 
 | Stream                          | Owner       | Code owned                                                            | Deliverables                                                                                                                                                 | Report section                                                                        |
 | ------------------------------- | ----------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
@@ -220,7 +220,7 @@ Richard and Andrew are unblocked from day 1 by the `Task`/`Mode` contracts. C ca
 
 **Report** (owner per section in §8): 1 Intro & related work · 2 Setup · 3 Method · 4 Results (4.1 E1, 4.2 E2, 4.3 E3, 4.4 theory check) · 5 Threats to validity · 6 Conclusion · Contribution statement · Appendix A implementation.
 
-**Presentation** (10 min, recorded, uploaded by Dec 3): problem + open problem (D, 2 min) → runner & instrumentation (Richard, 2 min) → E1/E2 results (B, 3 min) → E3 + theory check + conclusion (C, 3 min).
+**Presentation** (10 min, recorded, uploaded by Dec 3): problem + open problem (D, 2 min) → runner & instrumentation (Richard, 2 min) → E1/E2 results (Andrew, 3 min) → E3 + theory check + conclusion (C, 3 min).
 
 ---
 
