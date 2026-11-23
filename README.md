@@ -187,7 +187,7 @@ Each stream has one owner who is accountable for its deliverable and its report 
 | Stream                          | Owner       | Code owned                                                            | Deliverables                                                                                                                                                 | Report section                                                                        |
 | ------------------------------- | ----------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
 | **A. Runner & instrumentation** | **Richard** | `runner.py`, `instrument.py`, `modes/hogwild.py`                      | Shared-memory worker pool; version-counter τ; injected-τ wait; straggler sim; interference probe; evaluator snapshots. Pilot numbers on T1/T2 by **Nov 24**. | §3 Method (async runner, instrumentation); §Appendix A implementation details         |
-| **B. Tasks & models**           | **TBD**     | `tasks.py`, `models.py`, `modes/serial.py`, `configs/t*.yaml`         | Four tasks with loaders, models, `target_loss`, tuned `default_eta` (η sweep on serial); evaluation harness. Serial reference curves by **Nov 24**.          | §2 Setup (tasks, models, target losses); §4.1 E1 results write-up                     |
+| **B. Tasks & models**           | **Andrew**  | `tasks.py`, `models.py`, `modes/serial.py`, `configs/t*.yaml`         | Four tasks with loaders, models, `target_loss`, tuned `default_eta` (η sweep on serial); evaluation harness. Serial reference curves by **Nov 24**.          | §2 Setup (tasks, models, target losses); §4.1 E1 results write-up                     |
 | **C. Baselines & sweep**        | **TBD**     | `modes/sync.py`, `modes/backup.py`, `sweep.py`, `configs/sweeps/`, VM | Sync and backup-worker modes; sweep driver with resume; VM provisioning; running E1–E4 and getting every row into `results/` by **Nov 28**.                  | §4.3 E3 straggler results; §5 Threats to validity (timing, overhead ceiling)          |
 | **D. Analysis & writing**       | **TBD**     | `analysis/`, `report/`                                                | All figures from `plots.py`; τ histograms and interference; `bound_check.py` vs. Mania et al.; report skeleton **Nov 27**, draft **Nov 30**; slide deck.     | §1 Intro & related work; §4.2 E2 injected-τ results; §4.4 theory check; §6 Conclusion |
 
@@ -197,11 +197,11 @@ Shared by everyone: own report section, slides for own section (2–3 each), con
 
 ```
 schema.py (all, Nov 22)
-   ├── tasks.py + serial (B) ──┐
+   ├── tasks.py + serial (Andrew) ──┐
    └── runner + hogwild (Richard) ─┴─► pilot gate Nov 24 ─► sync/backup + sweep (C) ─► results Nov 28 ─► analysis + report (D)
 ```
 
-A and B are unblocked from day 1 by the `Task`/`Mode` contracts. C can write `sync`/`backup` against a stub `Task` and only needs the real runner for the smoke test on Nov 25. D builds `plots.py` against synthetic `ResultRow`s until real rows land Nov 27.
+Richard and Andrew are unblocked from day 1 by the `Task`/`Mode` contracts. C can write `sync`/`backup` against a stub `Task` and only needs the real runner for the smoke test on Nov 25. D builds `plots.py` against synthetic `ResultRow`s until real rows land Nov 27.
 
 ---
 

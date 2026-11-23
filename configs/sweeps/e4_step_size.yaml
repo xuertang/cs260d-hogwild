@@ -1,0 +1,22 @@
+# E4 — step size (tests H1). README §5.
+# Format: see the header of e1_scaling.yaml.
+#
+# sync and hogwild at m = 8, eta at 0.5x and 2x the serial-tuned value. The 1x
+# point is not repeated here: it is the m = 8 column of E1.
+#   4 tasks x 2 modes x 2 eta x 3 seeds = 48
+#
+# First experiment to cut if the sweep overruns.
+
+name: e4_step_size
+seeds: [0, 1, 2]
+expected_runs: 48
+
+grids:
+  - base:
+      - configs/t1_rcv1_logreg.yaml
+      - configs/t2_mnist_softmax.yaml
+      - configs/t3a_mnist_mlp.yaml
+      - configs/t3b_cifar_cnn.yaml
+    mode: [sync, hogwild]
+    m: [8]
+    eta_mult: [0.5, 2.0]

@@ -1,0 +1,23 @@
+.swarm
+.claude-flow
+.claude
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Downloaded datasets (python -m hogwild.tasks download → ./data)
+data/
+
+# Run outputs: JSONL rows are synced via Drive, not git (README §2)
+results/*
+!results/.gitkeep
+
+# LaTeX build products
+report/*.aux
+report/*.log
+report/*.out
+report/*.bbl
+report/*.blg
+report/*.synctex.gz

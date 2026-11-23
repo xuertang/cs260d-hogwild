@@ -1,0 +1,15 @@
+# Dependencies from README §3. Versions are unpinned for now.
+# TODO(all): pin exact versions once the pilot gate (Nov 24) passes, so the VM
+#            and every laptop produce comparable timings.
+#
+# CPU-only torch is enough (no GPU anywhere in this project). On the Linux VM,
+# install it from the CPU wheel index to avoid pulling CUDA:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+torch
+torchvision
+scikit-learn   # RCV1 loader (T1)
+numpy
+pyyaml         # configs/*.yaml → Config
+pandas         # analysis/
+matplotlib     # analysis/plots.py

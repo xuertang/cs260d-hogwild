@@ -1,0 +1,24 @@
+# E2 — injected staleness (tests H2). README §5.
+# Format: see the header of e1_scaling.yaml.
+#
+# hogwild at m = 8 on the two non-convex tasks, tau in {8, 32, 128}, each at
+# the serial-tuned eta and at eta / (1 + tau).
+#   2 tasks x 3 tau x 2 step-size rules x 3 seeds = 36
+#
+# BLOCKED on the injection mechanism: "wait until the version advances K" as
+# written in the README cannot make progress for K >= m (see the warning on
+# hogwild/instrument.py: wait_for_staleness). Do not launch until that is
+# settled, and plot against MEASURED tau, not these nominal values.
+
+name: e2_injected_tau
+seeds: [0, 1, 2]
+expected_runs: 36
+
+grids:
+  - base:
+      - configs/t3a_mnist_mlp.yaml
+      - configs/t3b_cifar_cnn.yaml
+    mode: [hogwild]
+    m: [8]
+    tau_inject: [8, 32, 128]
+    eta_scale: [const, "1/(1+tau)"]

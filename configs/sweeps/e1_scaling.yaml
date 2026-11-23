@@ -1,0 +1,40 @@
+# E1 — scaling (tests H1, H2). README §5.
+#
+# PROPOSED sweep format (stream C owns it; hogwild/sweep.py is the only reader):
+#
+#   name            label for logs
+#   seeds           crossed with every grid block
+#   expected_runs   sweep.expand() asserts it produces exactly this many Configs
+#   grids           list of blocks; each block is a cartesian product of its
+#                   list-valued fields. `base` names per-task config files
+#                   (configs/t*.yaml, stream B — not created yet), every other
+#                   key is a Config field override.
+#   eta_mult        not a Config field: multiplies the base config's eta.
+#
+# E1: serial reference, then sync / backup(b=1) / hogwild at m in {2,4,8,16}.
+#   serial:      4 tasks x 3 seeds                    =  12
+#   multi-worker: 4 tasks x 3 modes x 4 m x 3 seeds   = 144
+#
+# Cut if time runs short (after E4): the m = 2 column.
+
+name: e1_scaling
+seeds: [0, 1, 2]
+expected_runs: 156
+
+grids:
+  - base: &all_tasks
+      - configs/t1_rcv1_logreg.yaml
+      - configs/t2_mnist_softmax.yaml
+      - configs/t3a_mnist_mlp.yaml
+      - configs/t3b_cifar_cnn.yaml
+    mode: [serial]
+    m: [1]
+
+  - base: *all_tasks
+    mode: [sync, hogwild]
+    m: [2, 4, 8, 16]
+
+  - base: *all_tasks
+    mode: [backup]
+    b: [1]
+    m: [2, 4, 8, 16]   # backup at m = 16 runs 17 processes — check the core map

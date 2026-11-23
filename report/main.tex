@@ -1,0 +1,84 @@
+% CS 260D final report — skeleton (stream D owns the file; each section has an owner).
+% Structure from README §10, owners from README §8.
+%
+% Rules:
+%   - Every figure comes from analysis/plots.py or analysis/bound_check.py and
+%     is \includegraphics'd from report/figures/. No hand-edited figures.
+%   - Every number in the text is copied from a results-derived table.
+%   - Draft complete Nov 30; one full read by someone other than the author.
+%
+% TODO(D): check the syllabus for a required template and page limit and
+%          switch \documentclass accordingly.
+
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{HOGWILD! on Dense, Non-Convex Problems}
+\author{TODO: four names}
+\date{CS 260D, Fall 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+% TODO(D): write last. One sentence each: gap in the theory, what we measured,
+% the three findings (H1, H2, H3), the theory check.
+\end{abstract}
+
+\section{Introduction and related work}  % owner: D
+% - HOGWILD! (Niu et al. 2011): lock-free SGD, guarantees under sparsity.
+% - Perturbed-iterate analysis (Mania et al. 2015).
+% - Backup workers (Chen et al. 2016).
+% - The lecture's open problems; which two we address (dense, non-convex) and
+%   the one we touch (reproducibility).
+% - Research questions H1–H3 (README §1).
+
+\section{Setup}  % owner: B
+% - Tasks T1–T3b: dataset, model, parameter count, touched-coordinate fraction.
+% - Target loss per task and how it is fixed from the serial run.
+% - Step-size tuning on serial.
+% - Hardware.
+
+\section{Method}  % owner: Richard
+% - Shared-memory runner: process pool, pinning, one thread per worker.
+% - Modes: serial, sync, backup, hogwild, hogwild with injected staleness.
+% - Instrumentation: version counter and tau, injection mechanism, straggler
+%   model, interference probe, evaluator snapshots.
+
+\section{Results}
+
+\subsection{E1: scaling}  % owner: B
+% Primary figure: time-to-target vs. cores, one line per mode, one panel per task.
+% Then epochs-to-target vs. m and the tau histograms.
+
+\subsection{E2: injected staleness}  % owner: D
+
+\subsection{E3: stragglers}  % owner: C
+
+\subsection{Theory check}  % owner: D
+% Measured slowdown vs. the perturbed-iterate prediction; state plainly where
+% the theorem's assumptions do not hold.
+
+\section{Threats to validity}  % owner: C
+% - Timing resolution (2 s evaluator period), process overhead, memory bandwidth.
+% - Pure-compute ceiling for speed-up (README §9).
+% - Non-atomic lock-free adds; version-counter accuracy.
+% - Three seeds.
+
+\section{Conclusion}  % owner: D
+
+\section*{Contribution statement}  % all — required by the syllabus
+
+\appendix
+\section{Implementation details}  % owner: Richard
+% Start method, pinning and core map, snapshot non-atomicity, the version
+% counter design, how staleness is injected, straggler calibration.
+
+% TODO(D): references — Niu et al. 2011; Mania et al. 2015; Chen et al. 2016;
+% CS 260D Lecture 4.
+
+\end{document}

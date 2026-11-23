@@ -1,0 +1,30 @@
+# E3 — stragglers (tests H3). README §5.
+# Format: see the header of e1_scaling.yaml.
+#
+# sync, backup(b=1), backup(b=2) and hogwild at m = 8 under mild and heavy
+# worker-time tails.
+#   2 tasks x 4 mode variants x 2 tails x 3 seeds = 48
+#
+# The README's fallback cut list mentions "T3b from E3", but E3 as specified
+# runs T2 and T3a only — nothing to cut here unless the matrix changes.
+#
+# Note for the write-up: backup uses m + b = 9 or 10 processes against 8 for
+# sync and hogwild.
+
+name: e3_stragglers
+seeds: [0, 1, 2]
+expected_runs: 48
+
+grids:
+  - base: &e3_tasks
+      - configs/t2_mnist_softmax.yaml
+      - configs/t3a_mnist_mlp.yaml
+    mode: [sync, hogwild]
+    m: [8]
+    straggler: [mild, heavy]
+
+  - base: *e3_tasks
+    mode: [backup]
+    b: [1, 2]
+    m: [8]
+    straggler: [mild, heavy]
