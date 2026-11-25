@@ -1,23 +1,26 @@
-"""Instrumentation shared by every mode (stream A, README §4 "Instrumentation").
+"""Instrumentation shared by every mode (README §4 "Instrumentation").
 
-Five pieces, each a stub below:
-
-    VersionCounter      shared int64 → tau per update
+    VersionCounter      shared per-worker counters → tau per update
     TauHistogram        per-worker tau counts, merged into ResultRow.tau_hist
-    wait_for_staleness  injected tau (E2)
-    StragglerSim        per-step sleep c + Exp(lambda) (E3)
+    DelayQueue          injected staleness (E2)
+    StragglerSim        per-step delay c + Exp(lambda) (E3)
     InterferenceProbe   cosine between two workers' in-flight gradients
-    Logger              the `log` argument of Mode.run
+    Logger              the `log` argument of Mode.run; collects the curves
+    first_crossing      time / epochs at which a curve first reaches the target
 
-Everything here is touched from worker processes, so anything shared must live
-in a `share_memory_()` tensor or a multiprocessing primitive — plain Python
-attributes are per-process copies after fork/spawn.
-
-STUB: signatures and comments only. Nothing here is implemented yet.
+Anything shared between processes lives in a `share_memory_()` tensor. Plain
+Python attributes are per-process copies after the workers are spawned, which
+is exactly what the local accumulators below rely on.
 """
 
 from __future__ import annotations
 
+import math
+import sys
+import time
+from collections import Counter, deque
+
+import numpy as np
 import torch
 
 # --------------------------------------------------------------------------- #
@@ -26,125 +29,146 @@ import torch
 
 
 class VersionCounter:
-    """Global update counter. tau = v_write - v_read (README §4).
+    """Global count of updates, stored as one int64 slot per worker.
 
-    Worker protocol, per step:
-        v_read  = version.read()        # before copying params
-        ... copy params, compute gradient ...
+    Worker protocol, per step (README §4):
+        v_read  = version.read()        # before reading params
+        ... compute gradient ...
         v_write = version.read()        # just before the in-place add
         ... add ...
-        version.bump()                  # after the add
+        version.bump(worker_id)         # after the add
+        tau = v_write - v_read
 
-    DESIGN DECISION (pick one, document it in Appendix A):
-      (a) Plain shared int64 tensor, `+= 1` with no lock. Matches the lock-free
-          spirit and costs nothing, but read-modify-write races lose
-          increments, so tau is biased LOW exactly when contention is highest.
-      (b) `multiprocessing.Value("q")` with its lock held only for the
-          increment. Exact tau, but adds a (tiny) serialisation point to a run
-          that is supposed to have none — measure the throughput cost at m=16.
-      (c) One counter per worker (no sharing, no race); the global version is
-          the sum over workers. Exact and lock-free; the read is m loads.
-    (c) looks best but confirm that the sum read is cheap next to a gradient.
+    Why per-worker slots: a single shared counter incremented without a lock
+    loses increments under contention (so tau would read low exactly when it
+    matters), and a locked counter would put a serialisation point into a run
+    that is supposed to have none. Here each worker writes only its own slot,
+    so nothing is lost and nothing is locked; the global version is the sum.
+    The sum is not an atomic snapshot — it can be off by updates that land
+    during the read, i.e. by less than the number of workers.
+
+    The same class counts examples processed (bump by the batch size).
     """
 
     def __init__(self, num_workers: int) -> None:
-        # TODO: allocate the shared storage for whichever option is chosen.
-        raise NotImplementedError
+        self.slots = torch.zeros(num_workers, dtype=torch.int64).share_memory_()
+        self._view: np.ndarray | None = None
+
+    def _np(self) -> np.ndarray:
+        if self._view is None:          # numpy view: ~10x cheaper per call than tensor ops
+            self._view = self.slots.numpy()
+        return self._view
 
     def read(self) -> int:
-        """Current global version. Called twice per step by every worker."""
-        raise NotImplementedError
+        return int(self._np().sum())
 
-    def bump(self, worker_id: int) -> None:
-        """Record that one update has been written."""
-        raise NotImplementedError
+    def bump(self, worker_id: int, by: int = 1) -> None:
+        self._np()[worker_id] += by
+
+    def __getstate__(self) -> dict:
+        return {"slots": self.slots, "_view": None}
 
 
 class TauHistogram:
-    """tau → count, accumulated locally in each worker and merged at the end.
-
-    Keep it process-local (a dict or a fixed-size int64 array) and ship it back
-    through the result queue when the worker exits: a shared histogram would be
-    one more thing the workers contend on.
-    """
+    """tau → count, kept local to one worker and merged when the run ends."""
 
     def __init__(self) -> None:
-        raise NotImplementedError
+        self.counts: Counter[int] = Counter()
 
     def record(self, tau: int) -> None:
-        raise NotImplementedError
+        self.counts[tau] += 1
 
     @staticmethod
-    def merge(parts: list["TauHistogram"]) -> dict[int, int]:
-        """Combine per-worker histograms into the dict stored in ResultRow.tau_hist."""
-        raise NotImplementedError
+    def merge(parts: list[dict[int, int]]) -> dict[int, int]:
+        total: Counter[int] = Counter()
+        for part in parts:
+            total.update(part)
+        return dict(sorted(total.items()))
+
+
+def tau_mean(hist: dict[int, int]) -> float:
+    n = sum(hist.values())
+    return sum(t * c for t, c in hist.items()) / n if n else float("nan")
 
 
 # --------------------------------------------------------------------------- #
-# Injected tau (E2: tau in {8, 32, 128} at m = 8)
+# Injected tau (E2)
 # --------------------------------------------------------------------------- #
 
 
-def wait_for_staleness(version: VersionCounter, v_read: int, k: int) -> int:
-    """Spin until `version.read() - v_read >= k`, then return the version seen.
+class DelayQueue:
+    """Holds each gradient back for `delay` of the worker's own steps.
 
-    README: "worker waits until the version counter has advanced >= K before
-    writing".
+    The README describes injection as "wait until the version counter has
+    advanced >= K before writing". Taken literally that cannot run: while one
+    worker waits, at most m - 1 other updates can land, so no worker ever sees
+    the counter advance by K >= m (and E2 uses K = 8, 32, 128 at m = 8).
 
-    WARNING — as literally specified this deadlocks. If every worker is waiting
-    for K other updates, nobody is writing, so the counter never advances. With
-    m = 8 workers at most m - 1 = 7 updates can land while one worker waits, so
-    K = 8, 32 and 128 (all of E2) can never be satisfied.
+    A delay queue gives the same effect without blocking. Each worker keeps
+    computing gradients and applies the one it computed `delay` steps ago. With
+    m workers interleaving, a gradient that waits d local steps is about d * m
+    global versions old, so for a target of K we use
 
-    Options to resolve before the pilot gate:
-      (a) Delay queue: each worker keeps a FIFO of its own pending gradients
-          and applies the one computed ~K versions ago while it keeps computing
-          new ones. Never blocks; staleness is K by construction. This is the
-          standard way to simulate delay and probably what we want.
-      (b) Stale read instead of late write: each worker reads from a snapshot
-          of the params that is K versions old (ring buffer of snapshots in the
-          main process). Costs memory = K x model size; fine at 0.3M params.
-      (c) Spin with a timeout and write anyway. Simple, but the achieved tau is
-          then not K — it must be reported from the histogram, not the config.
-    Whichever is chosen, E2 plots should use measured tau from TauHistogram.
+        delay = ceil(K / m)        →   tau ≈ K + natural staleness.
 
-    TODO: implement the chosen option; this signature may need to change.
+    The achieved tau is whatever the histogram says; reports must use the
+    measured value, not K.
     """
-    raise NotImplementedError
+
+    def __init__(self, tau_inject: int, num_workers: int) -> None:
+        self.delay = math.ceil(tau_inject / num_workers) if tau_inject > 0 else 0
+        self._fifo: deque = deque()
+
+    def push(self, item):
+        """Queue the newest item; return the one that is now due, or None while filling."""
+        if self.delay == 0:
+            return item
+        self._fifo.append(item)
+        return self._fifo.popleft() if len(self._fifo) > self.delay else None
 
 
 # --------------------------------------------------------------------------- #
 # Straggler simulation (E3)
 # --------------------------------------------------------------------------- #
 
+# c in seconds: the fixed part of the injected per-step delay. Same order as
+# one gradient step on T2/T3a, so a "none" run and a "mild" run stay comparable.
+STRAGGLER_BASE_S = 200e-6
+
+# s / c, where s = 1/lambda is the mean of the exponential part. Chosen so that
+# p99.5 / median of (c + Exp) equals the README's tail factor r:
+#     median = c + s ln 2,  p99.5 = c + s ln 200   →   s/c = (r - 1) / (ln 200 - r ln 2)
+STRAGGLER_RATIO = {"none": None, "mild": 0.2556, "heavy": 4.3905}   # r = 2 and r = 6
+
 
 class StragglerSim:
-    """Per-step sleep of c + Exp(lambda) seconds (README §4).
+    """Per-step delay of c + Exp(lambda) (README §4).
 
-    Presets (README): "mild" = tail 2x median, "heavy" = tail 6x median, the
-    99.5-percentile / max ratios measured in Lecture 4.
+    The delay is a busy-wait, not a sleep: OS sleeps are only accurate to
+    ~100 µs, the same size as c, and a slow machine is busy rather than idle.
+    Long delays sleep for most of the interval and spin for the last
+    millisecond so the tail does not burn a core for nothing.
 
-    Calibration sketch, taking "tail" = 99.5th percentile and s = 1/lambda:
-        median = c + s ln 2        p99.5 = c + s ln 200
-        ratio r = p99.5 / median   →   s / c = (r - 1) / (ln 200 - r ln 2)
-        mild  (r = 2):  s / c ≈ 0.256
-        heavy (r = 6):  s / c ≈ 4.39
-    TODO: check the lecture's definition of "tail" (p99.5 vs. max) before
-          trusting these numbers, and pick c. c should be small next to one
-          gradient step so that straggler="none" and "mild" stay comparable —
-          or should c scale with the measured per-step compute time?
-
-    Each worker needs its own RNG stream (seed from cfg.seed and worker_id);
-    forked workers that share a seed all sleep in lockstep.
+    Each worker has its own generator, seeded from (seed, worker_id): workers
+    sharing a stream would all be slow at the same moments.
     """
 
     def __init__(self, kind: str, seed: int, worker_id: int) -> None:
-        # kind is Config.straggler: "none" | "mild" | "heavy".
-        raise NotImplementedError
+        ratio = STRAGGLER_RATIO[kind]
+        self.active = ratio is not None
+        self.scale = (ratio or 0.0) * STRAGGLER_BASE_S
+        self.rng = np.random.default_rng([seed, worker_id, 7919])
 
     def sleep(self) -> float:
-        """Sleep for one sampled delay and return it (0.0 when kind == "none")."""
-        raise NotImplementedError
+        if not self.active:
+            return 0.0
+        delay = STRAGGLER_BASE_S + self.rng.exponential(self.scale)
+        deadline = time.perf_counter() + delay
+        if delay > 2e-3:
+            time.sleep(delay - 1e-3)
+        while time.perf_counter() < deadline:
+            pass
+        return delay
 
 
 # --------------------------------------------------------------------------- #
@@ -153,37 +177,57 @@ class StragglerSim:
 
 
 class InterferenceProbe:
-    """Every N steps, two workers dump their in-flight gradient; log the cosine.
+    """Cosine between gradients that workers 0 and 1 have in flight at the same time.
 
-    Shape of the mechanism:
-      - two shared flat buffers of size num_params (one per probing worker) plus
-        a shared step-stamp for each;
-      - workers 0 and 1 copy their flattened gradient into their buffer every
-        `every` local steps;
-      - the main process (evaluator loop) reads both buffers when the stamps
-        are close and appends cos(g0, g1) to a list.
+    The global version is cut into windows of `every` updates. The first
+    gradient a probing worker computes in each window is copied into its shared
+    buffer and stamped with the window number. If the other worker's buffer
+    carries the same stamp, the two gradients were computed within one window
+    of each other — i.e. concurrently, up to `every` updates — and their
+    cosine is recorded. The worker that dumps second does the comparison, so
+    the main process is not involved and no worker ever waits.
 
-    TODO: decide what "concurrent" means — same global version window? The two
-          dumps are not synchronised, so record both stamps and let analysis
-          filter on |v0 - v1|.
-    TODO: for m = 1 (serial) and for sync modes there is no concurrent pair;
-          return NaN for ResultRow.interference_mean.
+    Caveats, both small: the other buffer may be mid-write when it is read (a
+    torn gradient, same as everything else here), and if both workers dump at
+    the same instant the pair is counted twice.
+
+    For sparse T1 the cosine is 0 whenever the two examples share no feature;
+    the mean is then the sparse-case overlap, which is what rho measures.
     """
 
-    def __init__(self, num_params: int, every: int = 100) -> None:
-        raise NotImplementedError
+    def __init__(self, num_params: int, every: int = 200) -> None:
+        self.buf = torch.zeros(2, num_params).share_memory_()
+        self.stamp = torch.full((2,), -1, dtype=torch.int64).share_memory_()
+        self.every = every
+        self._last = -1        # process-local from here down
+        self._sum = 0.0
+        self._n = 0
 
-    def maybe_dump(self, worker_id: int, step: int, grads: list[torch.Tensor]) -> None:
-        """Called by every worker each step; a no-op unless this worker is a prober and it is time."""
-        raise NotImplementedError
+    def maybe_dump(self, worker_id: int, key: int, grads: list[torch.Tensor]) -> None:
+        """`key` is the version (or round) the gradient was computed at."""
+        if worker_id > 1:
+            return
+        window = key // self.every
+        if window == self._last:
+            return
+        self._last = window
+        flat = torch.cat([(g.to_dense() if g.is_sparse else g).reshape(-1) for g in grads])
+        self.buf[worker_id].copy_(flat)
+        self.stamp[worker_id] = window
+        other = 1 - worker_id
+        if int(self.stamp[other]) == window:
+            cos = torch.nn.functional.cosine_similarity(flat, self.buf[other], dim=0).item()
+            if math.isfinite(cos):
+                self._sum += cos
+                self._n += 1
 
-    def sample(self) -> float | None:
-        """Called from the main process: cosine of the latest pair, or None if not fresh."""
-        raise NotImplementedError
+    def local_stats(self) -> tuple[float, int]:
+        return self._sum, self._n
 
-    def mean(self) -> float:
-        """Value for ResultRow.interference_mean."""
-        raise NotImplementedError
+    @staticmethod
+    def mean(parts: list[tuple[float, int]]) -> float:
+        n = sum(c for _, c in parts)
+        return sum(s for s, _ in parts) / n if n else float("nan")
 
 
 # --------------------------------------------------------------------------- #
@@ -194,22 +238,50 @@ class InterferenceProbe:
 class Logger:
     """The `log` argument of Mode.run(task, cfg, log).
 
-    The README names the type but does not define it (see OPEN (2) in
-    schema.py). Proposal: a thin object the runner creates in the main process
-    and the Mode uses to accumulate everything that ends up in a ResultRow,
-    plus human-readable progress on stderr.
-
-    It lives in the main process only. Workers never call it directly — they
-    send what they have (tau histogram, step counts) back over a queue.
+    Lives in the main process. It collects the evaluator's points (which become
+    curve_epoch / curve_wall) and carries the few per-run settings that are not
+    part of Config: where to stop and how often to evaluate. Keeping those here
+    leaves the Mode.run signature exactly as the README fixes it.
     """
 
-    def __init__(self, run_id: str, verbose: bool = True) -> None:
-        raise NotImplementedError
+    def __init__(self, run_id: str, epoch_limit: float, eval_period_s: float = 2.0, verbose: bool = True) -> None:
+        self.run_id = run_id
+        self.epoch_limit = epoch_limit        # cfg.max_epochs, or a fraction of an epoch for --smoke
+        self.eval_period_s = eval_period_s
+        self.verbose = verbose
+        self.points: list[tuple[float, float, float, float]] = []   # (epoch, wall_s, test_loss, test_acc)
+        self.final_params: list[torch.Tensor] | None = None         # set by the runner when training ends
 
     def eval_point(self, epoch: float, wall_s: float, test_loss: float, test_acc: float) -> None:
-        """Record one evaluator snapshot → curve_epoch and curve_wall."""
-        raise NotImplementedError
+        self.points.append((epoch, wall_s, test_loss, test_acc))
+        self.info(f"epoch {epoch:6.2f}  {wall_s:7.1f}s  loss {test_loss:.4f}  acc {test_acc:.4f}")
 
     def info(self, msg: str) -> None:
-        """Progress line for whoever is watching the terminal / the VM log."""
-        raise NotImplementedError
+        if self.verbose:
+            print(f"[{self.run_id}] {msg}", file=sys.stderr, flush=True)
+
+    @property
+    def curve_epoch(self) -> list[tuple[float, float]]:
+        return [(e, loss) for e, _, loss, _ in self.points]
+
+    @property
+    def curve_wall(self) -> list[tuple[float, float]]:
+        return [(w, loss) for _, w, loss, _ in self.points]
+
+
+def first_crossing(points: list[tuple[float, float, float, float]], target: float) -> tuple[float, float]:
+    """(wall_s, epochs) at which test loss first reaches `target`.
+
+    Linear interpolation between the last point above the target and the first
+    point at or below it, so the answer is not quantised to the evaluation
+    period. (inf, inf) if the target is never reached or is NaN (not tuned).
+    """
+    prev = None
+    for epoch, wall, loss, _ in points:
+        if loss <= target:
+            if prev is None or not math.isfinite(prev[2]) or prev[2] <= loss:
+                return wall, epoch
+            f = (prev[2] - target) / (prev[2] - loss)
+            return prev[1] + f * (wall - prev[1]), prev[0] + f * (epoch - prev[0])
+        prev = (epoch, wall, loss)
+    return float("inf"), float("inf")

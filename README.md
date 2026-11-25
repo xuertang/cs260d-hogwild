@@ -29,22 +29,28 @@ hogwild-dense/
 │   ├── t2_mnist_softmax.yaml
 │   ├── t3a_mnist_mlp.yaml
 │   ├── t3b_cifar_cnn.yaml
+│   ├── reference.yaml     # tuned η + target loss per task (written by hogwild/tune.py)
 │   └── sweeps/            # E1–E4 grids (see §5)
 ├── hogwild/
-│   ├── tasks.py           # Task registry: data loaders, target loss, eval
+│   ├── tasks.py           # Task registry: data loaders, gradients, eval, dataset download
 │   ├── models.py          # LogReg (sparse), Softmax, MLP, SmallCNN
-│   ├── runner.py          # process pool, shared-memory params, evaluator snapshots
+│   ├── runner.py          # worker processes, shared-memory params, evaluator snapshots, CLI
 │   ├── instrument.py      # version counter → τ, delay injection, straggler sim, interference probe
+│   ├── tune.py            # serial η sweep + reference curve → configs/reference.yaml
 │   ├── modes/
 │   │   ├── serial.py
 │   │   ├── sync.py        # m workers, barrier, averaged gradient
 │   │   ├── backup.py      # m + b workers, first m gradients win
 │   │   └── hogwild.py     # lock-free in-place adds on shared tensors
-│   ├── sweep.py           # expands a sweep YAML → runs → results/*.jsonl
+│   ├── sweep.py           # expands a sweep YAML → runs → results/*.jsonl, with resume
 │   └── schema.py          # Config + ResultRow dataclasses (the contracts in §6)
+├── scripts/run_all.sh     # E1–E4 with resume, then all figures
+├── tests/                 # python -m pytest tests -q  (no downloads needed)
 ├── analysis/
 │   ├── plots.py           # every figure in the report regenerates from results/
 │   ├── bound_check.py     # measured slowdown vs. perturbed-iterate prediction
+│   ├── summary.py         # one line per run of a results file
+│   ├── retarget.py        # recompute time-to-target for another target loss, from stored curves
 │   └── notebooks/
 ├── results/               # JSONL rows, one per run (git-ignored, synced via Drive)
 └── report/                # LaTeX report + slides
@@ -58,9 +64,13 @@ hogwild-dense/
 git clone <repo> && cd hogwild-dense
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt        # torch (CPU), torchvision, scikit-learn, numpy, pyyaml, pandas, matplotlib
-python -m hogwild.tasks download        # RCV1 via sklearn, MNIST + CIFAR-10 via torchvision → ./data
+python -m hogwild.tasks download        # RCV1 via sklearn, MNIST + CIFAR-10 via torchvision → ./data (~1.6 GB)
+python -m pytest tests -q               # ~15 s; every mode on a synthetic task
 python -m hogwild.runner --config configs/t2_mnist_softmax.yaml --mode serial --smoke
+python -m hogwild.runner --config configs/t2_mnist_softmax.yaml --mode hogwild --m 4 --out results/pilot.jsonl
 ```
+
+`configs/reference.yaml` holds each task's tuned η and target loss and is committed, so nobody needs to re-tune. To regenerate it: `python -m hogwild.tune --task t2 --etas 0.0001,0.0003,0.001`.
 
 Hardware: anything with ≥ 8 physical cores for development (laptop/desktop). The full sweep runs on one **32-vCPU cloud VM** (GCP `c2-standard-30` or similar, ~$1.50/hr, < $15 total). Colab is not usable — 2 vCPUs.
 
@@ -77,9 +87,9 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 | T1  | RCV1 binary (CCAT vs. rest) | ℓ2-logistic regression   | 47k    | ~0.2%                    | serial loss @ 5 epochs  |
 | T2  | MNIST                       | softmax regression       | 7.8k   | 100%                     | serial loss @ 10 epochs |
 | T3a | MNIST                       | 2-layer MLP (256 hidden) | 0.2M   | 100%                     | serial loss @ 10 epochs |
-| T3b | CIFAR-10                    | 4-conv CNN               | 0.3M   | 100%                     | serial loss @ 20 epochs |
+| T3b | CIFAR-10                    | 4-conv CNN               | 0.25M  | 100%                     | serial loss @ 20 epochs |
 
-"Target loss" is fixed per task from the serial run so that time-to-target is comparable across modes.
+"Target loss" is fixed per task from the serial run so that time-to-target is comparable across modes. Concretely it is the lowest per-epoch median serial test loss within the reference window, stored with the tuned η in `configs/reference.yaml`. Median per epoch because single points are noisy; lowest epoch rather than last because the CIFAR CNN overfits (its test loss bottoms out near epoch 5 and then rises, so "loss @ 20 epochs" would be crossed in the first epoch of every run). For T1, T2 and T3a the minimum is at or next to the last epoch, so this matches the table. T3b's target carries 10% slack on top (0.826 = 1.10 × 0.750): the bottom of an overfitting curve is a fragile target, and in the pilot HOGWILD! at m = 4 bottomed out just above the strict value and never crossed it. `configs/reference.yaml` keeps both numbers (`serial_best_loss`, `target_slack`). Every run gets 1.5× the reference epochs as its budget (T3b: 12 epochs, see `configs/t3b_cifar_cnn.yaml`), so a mode that is less efficient per epoch can still reach the target. Batch size is 1 for T1–T3a and 8 for T3b, per worker. T1 trains on the 781k-document part of RCV1 and tests on the 23k part, as in the HOGWILD! paper; its ℓ2 term is applied only to the coordinates an example touches, so updates stay sparse.
 
 ### Modes
 
@@ -89,15 +99,15 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 | `sync`            | m       | yes     | 0            | gradients averaged, same total batch as `hogwild`                      |
 | `backup`          | m + b   | yes     | 0            | first m gradients averaged, rest dropped (Chen et al. 2016)            |
 | `hogwild`         | m       | no      | measured     | lock-free in-place add on `share_memory_()` tensors                    |
-| `hogwild --tau K` | m       | no      | ≥ K injected | worker waits until the version counter has advanced ≥ K before writing |
+| `hogwild --tau K` | m       | no      | ≈ K injected | each worker applies the gradient it computed ⌈K/m⌉ of its own steps ago |
 
 ### Instrumentation (`hogwild/instrument.py`)
 
-- **τ per update**: shared int64 `version` tensor. Worker records `v_read` before copying params, `v_write` before its add, increments after. τ = v_write − v_read. Logged as a histogram per run.
-- **Injected τ**: spin until `version − v_read ≥ K`, then write. Sweeps τ past the core count.
-- **Straggler sim**: per-step sleep `c + Exp(λ)`; `mild` = tail 2× median, `heavy` = tail 6× median (the measured 99.5-pct / max from Lecture 4).
-- **Interference probe**: every N steps, two workers dump their in-flight gradient; cosine logged. Dense stand-in for ρ.
-- **Evaluator**: main process snapshots shared params every 2 s wall-clock and every epoch, evaluates test loss/acc. Gives both loss-vs-epoch and loss-vs-wall-clock curves from one run.
+- **τ per update**: shared int64 `version` tensor with one slot per worker (a worker only ever writes its own slot, so no increment is lost and nothing is locked; the version is the sum). Worker records `v_read` before reading params, `v_write` before its add, increments after. τ = v_write − v_read. Logged as a histogram per run.
+- **Injected τ**: a per-worker delay queue of ⌈K/m⌉ gradients. (Waiting for the counter to advance by K, as first planned, cannot run: while one worker waits at most m − 1 other updates land, so K ≥ m deadlocks.) The achieved τ is read from the histogram, not assumed. Sweeps τ past the core count.
+- **Straggler sim**: per-step delay `c + Exp(λ)` with c = 200 µs, busy-waited for precision; `mild` = tail 2× median, `heavy` = tail 6× median, with tail = 99.5th percentile (the measured 99.5-pct / max from Lecture 4).
+- **Interference probe**: once per window of N = 200 updates, workers 0 and 1 dump their in-flight gradient; cosine logged. Dense stand-in for ρ.
+- **Evaluator**: main process snapshots shared params every 2 s wall-clock and every quarter epoch, evaluates test loss/acc. Gives both loss-vs-epoch and loss-vs-wall-clock curves from one run. Time-to-target is interpolated between the two snapshots around the crossing.
 
 ### Metrics (one `ResultRow` per run)
 
@@ -118,8 +128,13 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 Runs take 1–5 min each on CPU. Sequential total ≈ 15 h; two sweeps in parallel on a 32-vCPU VM ≈ 8–10 h wall. **If time runs short, cut in this order:** E4 → m = 2 column of E1 → T3b from E3.
 
 ```bash
-python -m hogwild.sweep configs/sweeps/e1_scaling.yaml --out results/e1.jsonl --parallel 2
+python -m hogwild.sweep configs/sweeps/e1_scaling.yaml --out results/e1.jsonl --parallel 2   # one experiment
+bash scripts/run_all.sh                                                                      # E1–E4, then all figures
+python -m analysis.summary results/e1.jsonl                                                  # one line per run
+python -m analysis.plots && python -m analysis.bound_check                                   # → report/figures/
 ```
+
+Sweeps resume: a run's ID is a hash of its config, so re-running a command skips whatever is already in the output file. Failed runs go to `results/<exp>.failed.jsonl` and are retried on the next invocation. Side-by-side runs are pinned to disjoint cores; `scripts/run_all.sh` only runs two at a time when both fit.
 
 **Primary figure:** time-to-target vs. cores, one line per mode, one panel per task (E1). Secondary: τ histograms, injected-τ accuracy curves (E2), straggler crossover (E3), bound check.
 
@@ -128,6 +143,16 @@ python -m hogwild.sweep configs/sweeps/e1_scaling.yaml --out results/e1.jsonl --
 ## 6. Interfaces (so all four streams start on day 1)
 
 These contracts are fixed as of Nov 22 and live in `hogwild/schema.py`. Change them only via PR with all four reviewing.
+
+What the implementation settled where the contract was silent (all additive, nothing below changes a signature):
+
+- `params` in `Task.evaluate(params)` is a list of tensors in `model().parameters()` order.
+- Tasks also provide `grads(model, batch)` (the contract has no training loss; T1 needs a sparse gradient), `share_memory()` (one dataset copy for all workers) and `evaluate_curve(params)` (what the loss curves and the target use: the full test set, except T3b, which uses a fixed 2,000-image subset because a full pass takes several seconds on one core; `final_test_acc` always uses the full test set).
+- `Logger` is `hogwild.instrument.Logger`; it also carries the epoch limit, so `Mode.run` keeps its signature.
+- `Config.task` is `t1` / `t2` / `t3a` / `t3b`. In YAML, `eta: null` means "the task's tuned η" and `eta_mult` scales it (E4).
+- Curve points are `(epochs, test_loss)` and `(seconds, test_loss)`. A run that never reaches the target has `time_to_target_s = epochs_to_target = inf`.
+- `param_dist_to_seed0` is the L2 distance to the final parameters of the same config at seed 0; sweeps keep the parameters in `results/params/`.
+- `sync` uses the tuned η unchanged with an m-times larger effective batch (one update per round); `backup` is the same round logic with b extra workers.
 
 ```python
 class Task:                       # tasks.py
@@ -177,6 +202,49 @@ The midterm is behind us, so the original pilot window is gone; this is the comp
 | **Thu Dec 3**  | **Upload recording + report to Bruinlearn**                                                                         | Richard         |
 
 Daily: 15-min sync at 9 pm PT on Discord. Blockers go in the channel immediately, not at the sync.
+
+### Status — Nov 24
+
+| Milestone | State |
+| --- | --- |
+| `serial` + T1/T2 loaders end to end; runner | Done. All four tasks, all four modes, tests in `tests/`. |
+| **Pilot gate** (hogwild on T1, T2 at m = 4 with τ logged; serial curves + tuned η for all tasks) | **Passed on a laptop** — numbers below. Tuned values in `configs/reference.yaml`. |
+| `sync` + `backup` pass the smoke test | Done (smoke on T1, T2, T3a; full runs on T2). |
+| Sweep driver runs E1 for T1 | Driver works with resume. For T1 it ran serial and hogwild only; T1 sync/backup were smoke-tested, not run to completion. |
+| VM provisioned; E1–E4 on the VM | **Not done.** Needs someone's cloud account. One command once it exists: `bash scripts/run_all.sh`. |
+| Plots, bound check | Code done; exercised on synthetic rows and on the pilot rows (`report/figures/pilot/`). |
+| Report | Skeleton with figure placeholders compiles; §3 and Appendix A have draft text. No results text. |
+| Slides, recording, upload | Not started. |
+
+Pilot, seed 0 only, Apple-silicon laptop with 6 performance cores (so m ≤ 4; these are development numbers, not report numbers). Rows are in `results/pilot/e1.jsonl`.
+
+| Task | Mode | m | Updates/s | Time to target (s) | Epochs to target | Speed-up | Final acc | Mean τ | Gradient cosine |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| T1 | serial | 1 | 20,339 | 150.7 | 3.86 | 1.00× | 0.9480 | 0.00 | — |
+| T1 | hogwild | 2 | 40,816 | 98.4 | 5.03 | 1.53× | 0.9474 | 0.57 | 0.0036 |
+| T1 | hogwild | 4 | 79,013 | 41.9 | 4.23 | 3.60× | 0.9470 | 1.72 | 0.0037 |
+| T2 | serial | 1 | 13,922 | 32.1 | 7.25 | 1.00× | 0.9228 | 0.00 | — |
+| T2 | hogwild | 2 | 26,668 | 15.8 | 7.67 | 2.03× | 0.9237 | 0.73 | 0.0202 |
+| T2 | hogwild | 4 | 53,441 | 10.1 | 8.89 | 3.16× | 0.9218 | 2.20 | 0.0128 |
+| T2 | sync | 2 | 8,168 | 43.9 | 11.97 | 0.73× | 0.9218 | 0.00 | 0.0107 |
+| T2 | sync | 4 | 4,989 | never | never | — | 0.9202 | 0.00 | 0.0119 |
+| T2 | backup (b=1) | 2 | 7,242 | 44.8 | 10.70 | 0.72× | 0.9226 | 0.00 | 0.0098 |
+| T2 | backup (b=1) | 4 | 4,355 | never | never | — | 0.9201 | 0.00 | 0.0235 |
+| T3a | serial | 1 | 5,932 | 63.9 | 6.25 | 1.00× | 0.9850 | 0.00 | — |
+| T3a | hogwild | 2 | 10,561 | 33.9 | 5.93 | 1.88× | 0.9839 | 0.73 | 0.0105 |
+| T3a | hogwild | 4 | 18,812 | 24.8 | 7.72 | 2.58× | 0.9838 | 2.25 | 0.0132 |
+| T3b | serial | 1 | 139 | 154.8 | 3.53 | 1.00× | 0.7409 | 0.00 | — |
+| T3b | hogwild | 2 | 279 | 81.3 | 3.61 | 1.91× | 0.7581 | 0.85 | 0.0090 |
+| T3b | hogwild | 4 | 510 | 54.5 | 4.42 | 2.84× | 0.7391 | 2.90 | 0.0156 |
+
+What the pilot already shows, and what it changed in the plan:
+
+- **HOGWILD! throughput scales** (3.2–3.9× the serial update rate at m = 4 on every task) and mean τ stays below m. On all three dense tasks it needs more epochs to reach the target at m = 4 than serial does, which is the H1 prediction; one seed is not enough to call it.
+- **Sync at the serial-tuned η loses to serial on T2**: one update per round means m× fewer updates per epoch, and at m = 4 it does not reach the target within the budget. This is the README's design (no rescaling; E4 varies η), but expect many `inf` rows for sync/backup in E1 at large m. Decide before the sweep whether that is the comparison we want.
+- **RCV1 is sparse per example but its conflict graph is not**: 89% of random document pairs share at least one feature (`conflict_frac` in `configs/reference.yaml`), so the n/Δ term of the Mania et al. bound is about 1 for T1 as well. The measured gradient cosine does separate the tasks (0.004 on T1 against 0.01–0.02 on the dense tasks). §4.4 has to be argued from that, not from n/Δ.
+- **Target loss had to be redefined** (best serial epoch, not the last one) because the CIFAR CNN overfits; see §4. **T3b additionally gets 10% slack.** Against the strict target, HOGWILD! at m = 4 never got there: its best epoch has test loss 0.81 against 0.74 for serial, with the same final accuracy (73.9% vs. 74.1%). Whether that gap is a real H2 effect or one seed is exactly what E1 on T3b should answer, so report the best-epoch loss per mode next to time-to-target; the slack only keeps the time measurable. The table above uses the slackened target. Every row stores its full curves, so `python -m analysis.retarget` recomputes time-to-target for any other target without rerunning.
+- **Time-to-target is a first crossing of a noisy curve**, so it is biased early (serial reaches the T2 target at epoch 7 although the target was defined at epoch 10). All modes share the bias; the seed spread will show how much it matters.
+- **Run times are longer than the 1–5 min estimate for serial runs**: about 1 min (T2), 2.5 min (T3a), 5 min (T1) and 10 min (T3b, 12 epochs) on one laptop performance core.
 
 ---
 

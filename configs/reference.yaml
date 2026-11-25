@@ -1,0 +1,72 @@
+# Written by `python -m hogwild.tune`. Serial reference values per task.
+t1:
+  batch_size: 1
+  conflict_frac: 0.8937
+  default_eta: 0.3
+  eta_grid:
+  - 0.1
+  - 0.3
+  - 1.0
+  - 3.0
+  n_train: 781265
+  ref_epochs: 5
+  serial_best_loss: 0.14414
+  serial_final_acc: 0.9475
+  serial_wall_s: 230.9
+  target_epoch: 5
+  target_loss: 0.14414
+  target_slack: 0.0
+t2:
+  batch_size: 1
+  conflict_frac: 1.0
+  default_eta: 0.0003
+  eta_grid:
+  - 5.0e-05
+  - 0.0001
+  - 0.0002
+  - 0.0003
+  - 0.001
+  - 0.003
+  - 0.01
+  n_train: 60000
+  ref_epochs: 10
+  serial_best_loss: 0.27335
+  serial_final_acc: 0.9197
+  serial_wall_s: 49.0
+  target_epoch: 10
+  target_loss: 0.27335
+  target_slack: 0.0
+t3a:
+  batch_size: 1
+  conflict_frac: 1.0
+  default_eta: 0.003
+  eta_grid:
+  - 0.001
+  - 0.003
+  - 0.01
+  - 0.03
+  n_train: 60000
+  ref_epochs: 10
+  serial_best_loss: 0.0599
+  serial_final_acc: 0.9832
+  serial_wall_s: 194.3
+  target_epoch: 9
+  target_loss: 0.0599
+  target_slack: 0.0
+t3b:
+  batch_size: 8
+  conflict_frac: 1.0
+  default_eta: 0.01
+  eta_grid:
+  - 0.003
+  - 0.01
+  - 0.02
+  - 0.05
+  n_train: 50000
+  ref_epochs: 20
+  serial_best_loss: 0.75049
+  serial_final_acc: 0.731
+  serial_wall_s: 951.6
+  target_epoch: 7
+  target_loss: 0.82553
+  target_slack: 0.1

@@ -1,14 +1,18 @@
-% CS 260D final report — skeleton (stream D owns the file; each section has an owner).
-% Structure from README §10, owners from README §8.
+% CS 260D final report — skeleton with figure placeholders.
+% Structure from README §10, section owners from README §8.
 %
 % Rules:
 %   - Every figure comes from analysis/plots.py or analysis/bound_check.py and
-%     is \includegraphics'd from report/figures/. No hand-edited figures.
+%     lives in report/figures/. No hand-edited figures.
 %   - Every number in the text is copied from a results-derived table.
 %   - Draft complete Nov 30; one full read by someone other than the author.
 %
-% TODO(D): check the syllabus for a required template and page limit and
-%          switch \documentclass accordingly.
+% Status: §3 and Appendix A describe the code as it is implemented and are
+% draft text to be edited by the section owner. Everything under §4 is a
+% placeholder until the full sweep has run: a figure that has not been
+% generated yet shows up as a labelled box, so this file always compiles.
+%
+% Before submitting: check the syllabus for a required template / page limit.
 
 \documentclass[11pt]{article}
 \usepackage[margin=1in]{geometry}
@@ -17,18 +21,33 @@
 \usepackage{booktabs}
 \usepackage{hyperref}
 
+\graphicspath{{figures/}}
+
+% \fig{file}{width}{caption}{label}: the figure if it exists, a box if not.
+\newcommand{\fig}[4]{%
+  \begin{figure}[t]\centering
+  \IfFileExists{figures/#1.pdf}%
+    {\includegraphics[width=#2]{#1.pdf}}%
+    {\fbox{\parbox[c][3cm][c]{0.8\linewidth}{\centering\texttt{figures/\detokenize{#1}.pdf}\\not generated yet}}}%
+  \caption{#3}\label{#4}
+  \end{figure}}
+
+% \tab{file}: a generated tabular if it exists.
+\newcommand{\tab}[1]{\IfFileExists{figures/#1.tex}{\input{figures/#1.tex}}{\fbox{\texttt{figures/\detokenize{#1}.tex} not generated yet}}}
+
 \title{HOGWILD! on Dense, Non-Convex Problems}
-\author{TODO: four names}
+\author{Richard \and Andrew \and (C) \and (D)}   % fill in full names
 \date{CS 260D, Fall 2026}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-% TODO(D): write last. One sentence each: gap in the theory, what we measured,
-% the three findings (H1, H2, H3), the theory check.
+% Write last. One sentence each: the gap in the theory, what we measured, the
+% three findings (H1, H2, H3), the theory check.
 \end{abstract}
 
+% =========================================================================
 \section{Introduction and related work}  % owner: D
 % - HOGWILD! (Niu et al. 2011): lock-free SGD, guarantees under sparsity.
 % - Perturbed-iterate analysis (Mania et al. 2015).
@@ -37,48 +56,177 @@
 %   the one we touch (reproducibility).
 % - Research questions H1–H3 (README §1).
 
-\section{Setup}  % owner: B
-% - Tasks T1–T3b: dataset, model, parameter count, touched-coordinate fraction.
-% - Target loss per task and how it is fixed from the serial run.
-% - Step-size tuning on serial.
+% =========================================================================
+\section{Setup}  % owner: Andrew
+
+\begin{table}[h]\centering\small
+\begin{tabular}{llrrrl}
+\toprule
+Task & Model & Params & Train size & Batch & Target loss \\
+\midrule
+T1 RCV1 (CCAT vs.\ rest) & $\ell_2$-logistic regression & 47{,}236 & 781{,}265 & 1 & best serial epoch of 5 \\
+T2 MNIST & softmax regression & 7{,}850 & 60{,}000 & 1 & best serial epoch of 10 \\
+T3a MNIST & MLP, 256 hidden & 203{,}530 & 60{,}000 & 1 & best serial epoch of 10 \\
+T3b CIFAR-10 & 4-conv CNN & 245{,}962 & 50{,}000 & 8 & best serial epoch of 20, $+10\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Tasks, in order of rising density and then non-convexity. Tuned step
+sizes and the resulting target losses are in \texttt{configs/reference.yaml}.}
+\label{tab:tasks}
+\end{table}
+
+% To write:
+% - T1: train on the 781k-document part of RCV1 and test on the 23k part, as in
+%   Niu et al.; l2 penalty applied to touched coordinates only (why: a dense
+%   penalty would make every update dense). About 76 non-zeros per document.
+% - Step size: constant, chosen per task by a serial sweep (hogwild/tune.py);
+%   the same value is then used by every mode. Selected on test loss — say so.
+% - Target loss: lowest per-epoch median serial test loss within the reference
+%   window (the CNN overfits, so the last epoch is not the best one), plus 10%
+%   slack on T3b only; say why (pilot: HOGWILD! at m = 4 bottoms out just above
+%   the strict value). Budget: 1.5x the reference epochs; 12 epochs for T3b.
+% - T3b loss curves are evaluated on a fixed 2,000-image subset of the test
+%   set; final accuracy uses all 10,000.
 % - Hardware.
 
+% =========================================================================
 \section{Method}  % owner: Richard
-% - Shared-memory runner: process pool, pinning, one thread per worker.
-% - Modes: serial, sync, backup, hogwild, hogwild with injected staleness.
-% - Instrumentation: version counter and tau, injection mechanism, straggler
-%   model, interference probe, evaluator snapshots.
 
+\paragraph{Runner.}
+All modes share one runner. The model is created once and placed in shared
+memory; $m$ worker processes, each restricted to a single thread and pinned to
+its own core, compute minibatch gradients directly on the shared parameters.
+The dataset is shared in the same way, so there is one copy regardless of $m$.
+Workers start behind a barrier and the clock starts when it is released, which
+keeps process start-up out of every timing. The main process is the
+evaluator: every 2\,s and every quarter epoch it copies the shared parameters
+and computes test loss and accuracy, giving loss against both epochs and
+wall-clock time from the same run. An epoch is $n$ training examples applied
+to the model, summed over workers.
+
+\paragraph{Modes.}
+\emph{Serial} is one worker. \emph{HOGWILD!} is $m$ workers that update the
+shared parameters in place with no lock. \emph{Sync} runs in rounds: all $m$
+workers compute a gradient at the same parameters and a single update applies
+their average. \emph{Backup} runs $m+b$ workers and closes a round as soon as
+$m$ gradients have arrived; the remaining $b$ are discarded, never applied
+late, so staleness stays zero. With per-worker batch size $B$, a sync round
+makes one update from $mB$ examples where HOGWILD! makes $m$ updates from the
+same examples; the step size is the same in both.
+
+\paragraph{Staleness.}
+A shared version counter holds one slot per worker; a worker increments only
+its own slot, so no increment is lost and nothing is locked, and the global
+version is the sum. A worker reads the version before it reads the parameters
+($v_\mathrm{read}$) and again just before it writes ($v_\mathrm{write}$);
+$\tau = v_\mathrm{write} - v_\mathrm{read}$ is recorded for every update.
+
+\paragraph{Injected staleness.}
+To push $\tau$ beyond the number of cores, each worker holds its gradients in
+a queue and applies the one it computed $\lceil K/m \rceil$ of its own steps
+earlier, which makes it about $K$ versions old. (Blocking until the counter
+has advanced by $K$ does not work: while one worker waits, at most $m-1$
+updates can land.) We report the measured $\tau$, not $K$. The compensated
+step size is $\eta/(1+K)$.
+
+\paragraph{Stragglers.}
+Each step is followed by a delay $c + \mathrm{Exp}(\lambda)$ with
+$c = 200\,\mu$s. The two settings fix the ratio of the 99.5th percentile to
+the median at 2 (mild) and 6 (heavy).
+
+\paragraph{Interference.}
+Once per window of 200 updates, two workers record the gradient they are
+about to apply; when both records fall in the same window we log their cosine.
+For sparse T1 this is zero unless the two examples share a feature; for dense
+models it is our stand-in for the conflict parameter of the sparse analysis.
+
+% =========================================================================
 \section{Results}
 
-\subsection{E1: scaling}  % owner: B
-% Primary figure: time-to-target vs. cores, one line per mode, one panel per task.
-% Then epochs-to-target vs. m and the tau histograms.
+\subsection{E1: scaling}  % owner: Andrew
+\fig{e1_speedup}{\linewidth}{Speed-up $T_1/T_m$ in time to target (E1).}{fig:e1-speedup}
+\fig{e1_time_to_target}{\linewidth}{Time to target loss against workers, one
+line per mode, one panel per task (E1).}{fig:e1-time}
+\fig{e1_epochs_to_target}{\linewidth}{Epochs to target loss against workers:
+the statistical-efficiency half of H1.}{fig:e1-epochs}
+\fig{tau_histograms}{\linewidth}{Measured staleness $\tau$ per task and
+number of workers (HOGWILD! runs of E1).}{fig:tau}
 
 \subsection{E2: injected staleness}  % owner: D
+\fig{e2_injected_tau}{\linewidth}{Test loss against epochs under injected
+staleness, with the tuned step size and with $\eta/(1+\tau)$ (E2).}{fig:e2}
 
 \subsection{E3: stragglers}  % owner: C
+\fig{e3_straggler_crossover}{0.8\linewidth}{Time to target against the tail
+factor of worker step times (E3).}{fig:e3}
+
+\subsection{Step-size sensitivity}  % E4; supports H1
+\fig{e4_step_size}{\linewidth}{Sync and HOGWILD! at $0.5\times$, $1\times$
+and $2\times$ the serial step size, $m = 8$ (E4).}{fig:e4}
 
 \subsection{Theory check}  % owner: D
-% Measured slowdown vs. the perturbed-iterate prediction; state plainly where
-% the theorem's assumptions do not hold.
+\fig{bound_check}{0.8\linewidth}{Measured slowdown in epochs-to-target
+against measured $\tau$, with the scale $n/\Delta$ from the perturbed-iterate
+bound marked per task.}{fig:bound}
+\fig{interference}{0.6\linewidth}{Mean cosine between concurrent in-flight
+gradients per task.}{fig:interference}
+\begin{table}[h]\centering\small
+\resizebox{\linewidth}{!}{\tab{table_bound_constants}}
+\caption{Constants used in the theory check.}\label{tab:bound}
+\end{table}
+% State plainly where the theorem's assumptions do not hold (T3a, T3b), that
+% only the first term of the bound is estimated, and that the constant in the
+% O(.) is unknown, so the check is about scaling across tasks.
 
+\subsection{Reproducibility}
+\begin{table}[h]\centering\small
+\resizebox{\linewidth}{!}{\tab{table_reproducibility}}
+\caption{Run-to-run spread: distance of final parameters to the seed-0 run
+and spread of final test accuracy.}\label{tab:repro}
+\end{table}
+
+% =========================================================================
 \section{Threats to validity}  % owner: C
-% - Timing resolution (2 s evaluator period), process overhead, memory bandwidth.
-% - Pure-compute ceiling for speed-up (README §9).
-% - Non-atomic lock-free adds; version-counter accuracy.
-% - Three seeds.
+% - Timing: process and barrier overhead; memory bandwidth shared between
+%   workers and between side-by-side sweep runs; speed-up should be read
+%   against a pure-compute ceiling (README §9).
+% - Updates are not coordinate-atomic; the version counter read is a sum over
+%   slots and can be off by less than m.
+% - Evaluator snapshots are not atomic; time-to-target is interpolated between
+%   snapshots.
+% - Step size and target selected on test loss; three seeds.
+% - Sync uses the serial step size with an m-times larger effective batch.
+% - Backup uses b more cores than the other modes at the same m.
 
+% =========================================================================
 \section{Conclusion}  % owner: D
 
 \section*{Contribution statement}  % all — required by the syllabus
 
 \appendix
 \section{Implementation details}  % owner: Richard
-% Start method, pinning and core map, snapshot non-atomicity, the version
-% counter design, how staleness is injected, straggler calibration.
+\begin{itemize}
+\item Processes are started with the \texttt{spawn} method on every platform.
+\item Workers compute gradients on the shared parameters themselves, not on a
+  private copy, so a forward pass can observe a write that lands while it is
+  running (inconsistent read), as in the original algorithm.
+\item Parameter snapshots for evaluation are taken without stopping the
+  workers and may mix versions.
+\item In round-based modes the update and the round increment happen under
+  one lock, update first; a gradient is tagged with the round it was computed
+  in and rejected if that round has closed. This is what guarantees zero
+  staleness for every applied gradient.
+\item The straggler delay is a busy-wait, because OS sleeps are not accurate
+  at the 200\,$\mu$s scale.
+\item The sparse task returns its gradient as a sparse vector, so an update
+  writes only the coordinates the example touches; its closed-form gradient
+  is tested against automatic differentiation.
+\end{itemize}
 
-% TODO(D): references — Niu et al. 2011; Mania et al. 2015; Chen et al. 2016;
-% CS 260D Lecture 4.
+\begin{thebibliography}{9}
+\bibitem{niu2011} F.~Niu, B.~Recht, C.~R\'e, S.~J.~Wright. HOGWILD!: A lock-free approach to parallelizing stochastic gradient descent. NeurIPS 2011.
+\bibitem{mania2015} H.~Mania, X.~Pan, D.~Papailiopoulos, B.~Recht, K.~Ramchandran, M.~I.~Jordan. Perturbed iterate analysis for asynchronous stochastic optimization. 2015.
+\bibitem{chen2016} J.~Chen, R.~Monga, S.~Bengio, R.~Jozefowicz. Revisiting distributed synchronous SGD. 2016.
+\end{thebibliography}
 
 \end{document}

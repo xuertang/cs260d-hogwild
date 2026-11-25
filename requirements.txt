@@ -1,6 +1,6 @@
 # Dependencies from README §3. Versions are unpinned for now.
-# TODO(all): pin exact versions once the pilot gate (Nov 24) passes, so the VM
-#            and every laptop produce comparable timings.
+# Developed against torch 2.11 / torchvision 0.26 / scikit-learn 1.4 on Python 3.12.
+# Pin the versions actually installed on the VM (pip freeze) before the full sweep.
 #
 # CPU-only torch is enough (no GPU anywhere in this project). On the Linux VM,
 # install it from the CPU wheel index to avoid pulling CUDA:
@@ -13,3 +13,5 @@ numpy
 pyyaml         # configs/*.yaml → Config
 pandas         # analysis/
 matplotlib     # analysis/plots.py
+scipy          # RCV1 sparse matrices (comes with scikit-learn)
+pytest         # tests/

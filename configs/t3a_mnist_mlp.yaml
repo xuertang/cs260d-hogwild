@@ -1,0 +1,19 @@
+# T3a — MNIST, 2-layer MLP (256 hidden), 0.2M params, dense and non-convex.
+#
+# Base config: the serial reference run. Sweeps and CLI flags override
+# mode / m / b / seed / tau_inject / straggler on top of this file.
+#
+# eta is left null on purpose: it resolves to the task's tuned default_eta in
+# configs/reference.yaml (written by `python -m hogwild.tune --task t3a ...`).
+#
+# max_epochs is 1.5x the reference length (10 epochs). The target loss is
+# the serial loss at 10 epochs, so a run needs headroom to reach it when
+# it is less efficient per epoch than serial.
+
+task: t3a
+mode: serial
+m: 1
+eta: null
+seed: 0
+batch_size: 1
+max_epochs: 15
