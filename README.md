@@ -59,8 +59,13 @@ git clone <repo> && cd hogwild-dense
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt        # torch (CPU), torchvision, scikit-learn, numpy, pyyaml, pandas, matplotlib
 python -m hogwild.tasks download        # RCV1 via sklearn, MNIST + CIFAR-10 via torchvision → ./data
-python -m hogwild.runner --config configs/t2_mnist_softmax.yaml --mode serial --smoke
+python -m hogwild.modes.serial --config configs/t2_mnist_softmax.yaml --smoke
 ```
+
+Drop `--smoke` to run all configured serial epochs. Use `--eta` to try a
+different learning rate and `--out results/serial.jsonl` to save the result.
+Serial evaluation pauses training at epoch boundaries and after two seconds
+of training between evaluations. These pauses count toward the run's wall time.
 
 Hardware: anything with ≥ 8 physical cores for development (laptop/desktop). The full sweep runs on one **32-vCPU cloud VM** (GCP `c2-standard-30` or similar, ~$1.50/hr, < $15 total). Colab is not usable — 2 vCPUs.
 
@@ -80,6 +85,26 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 | T3b | CIFAR-10                    | 4-conv CNN               | 0.3M   | 100%                     | serial loss @ 20 epochs |
 
 "Target loss" is fixed per task from the serial run so that time-to-target is comparable across modes.
+
+Serial learning rates are selected by final validation loss using a 10% holdout
+from the training split with seed 0. The validation budgets are 5 epochs for
+T1, 10 for T2 and T3a, and 4 for T3b. The selected rates are then run on the full
+training splits with seed 0. The test loss at the configured final epoch sets
+the fixed target.
+
+| Task | Rates tested           | Selected rate | Target test loss |
+| ---- | ---------------------- | ------------: | ---------------: |
+| T1   | 0.5, 1, 2, 4           |             1 |         0.341143 |
+| T2   | 0.01, 0.025, 0.05, 0.1 |         0.025 |         0.279657 |
+| T3a  | 0.025, 0.05, 0.1, 0.2  |           0.1 |         0.063654 |
+| T3b  | 0.025, 0.05, 0.1       |           0.1 |         1.376215 |
+
+Training modes can call `hogwild.tasks.training_loss(task, model, x, y)` to use
+the same objective. T1 uses `1e-4` for the L2 coefficient. Each row carries a
+share of the penalty for its nonzero feature coordinates, weighted by inverse
+training frequency. The mean objective recovers full L2 on the observed
+coordinates and each gradient touches only the batch's feature coordinates and
+the bias. T1 evaluation uses the full test split and adds the L2 penalty once.
 
 ### Modes
 
