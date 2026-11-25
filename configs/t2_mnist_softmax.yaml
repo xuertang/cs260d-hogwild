@@ -1,0 +1,7 @@
+task: t2
+mode: serial
+m: 1
+eta: 0.025
+seed: 0
+batch_size: 64
+max_epochs: 10
