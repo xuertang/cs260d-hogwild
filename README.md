@@ -70,7 +70,7 @@ python -m hogwild.runner --config configs/t2_mnist_softmax.yaml --mode serial --
 python -m hogwild.runner --config configs/t2_mnist_softmax.yaml --mode hogwild --m 4 --out results/pilot.jsonl
 ```
 
-`configs/reference.yaml` holds each task's tuned η and target loss and is committed, so nobody needs to re-tune. To regenerate it: `python -m hogwild.tune --task t2 --etas 0.0001,0.0003,0.001`.
+`configs/reference.yaml` holds each task's tuned η and target loss and is committed, so nobody needs to re-tune. To regenerate it: `python -m hogwild.tune --task t2 --etas 0.0001,0.0003,0.001`. Step sizes are selected on a 10% validation holdout of the training set (seed 0); the test set is only used by the reference run that fixes the target.
 
 Hardware: anything with ≥ 8 physical cores for development (laptop/desktop). The full sweep runs on one **32-vCPU cloud VM** (GCP `c2-standard-30` or similar, ~$1.50/hr, < $15 total). Colab is not usable — 2 vCPUs.
 
@@ -87,9 +87,9 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 | T1  | RCV1 binary (CCAT vs. rest) | ℓ2-logistic regression   | 47k    | ~0.2%                    | serial loss @ 5 epochs  |
 | T2  | MNIST                       | softmax regression       | 7.8k   | 100%                     | serial loss @ 10 epochs |
 | T3a | MNIST                       | 2-layer MLP (256 hidden) | 0.2M   | 100%                     | serial loss @ 10 epochs |
-| T3b | CIFAR-10                    | 4-conv CNN               | 0.25M  | 100%                     | serial loss @ 20 epochs |
+| T3b | CIFAR-10                    | 4-conv CNN               | 0.3M   | 100%                     | serial loss @ 20 epochs |
 
-"Target loss" is fixed per task from the serial run so that time-to-target is comparable across modes. Concretely it is the lowest per-epoch median serial test loss within the reference window, stored with the tuned η in `configs/reference.yaml`. Median per epoch because single points are noisy; lowest epoch rather than last because the CIFAR CNN overfits (its test loss bottoms out near epoch 5 and then rises, so "loss @ 20 epochs" would be crossed in the first epoch of every run). For T1, T2 and T3a the minimum is at or next to the last epoch, so this matches the table. T3b's target carries 10% slack on top (0.826 = 1.10 × 0.750): the bottom of an overfitting curve is a fragile target, and in the pilot HOGWILD! at m = 4 bottomed out just above the strict value and never crossed it. `configs/reference.yaml` keeps both numbers (`serial_best_loss`, `target_slack`). Every run gets 1.5× the reference epochs as its budget (T3b: 12 epochs, see `configs/t3b_cifar_cnn.yaml`), so a mode that is less efficient per epoch can still reach the target. Batch size is 1 for T1–T3a and 8 for T3b, per worker. T1 trains on the 781k-document part of RCV1 and tests on the 23k part, as in the HOGWILD! paper; its ℓ2 term is applied only to the coordinates an example touches, so updates stay sparse.
+"Target loss" is fixed per task from the serial run so that time-to-target is comparable across modes. Concretely it is the lowest per-epoch median serial test loss within the reference window, stored with the tuned η in `configs/reference.yaml`. Median per epoch because single points are noisy; lowest epoch rather than last because the CIFAR CNN overfits (its test loss bottoms out near epoch 9 and then rises, so "loss @ 20 epochs" would be crossed in the first epoch of every run). For T1, T2 and T3a the minimum is at or next to the last epoch, so this matches the table. T3b's target carries 10% slack on top (0.883 = 1.10 × 0.803): the bottom of an overfitting curve is a fragile target, and in the pilot HOGWILD! at m = 4 bottomed out just above the strict value and never crossed it. `configs/reference.yaml` keeps both numbers (`serial_best_loss`, `target_slack`). Every run gets 1.5× the reference epochs as its budget (T3b: 14 epochs, see `configs/t3b_cifar_cnn.yaml`), so a mode that is less efficient per epoch can still reach the target. Batch size is 1 for T1–T3a and 8 for T3b, per worker. T1 trains on the 781k-document part of RCV1 and tests on the 23k part, as in the HOGWILD! paper; its ℓ2 term uses Andrew's inverse-frequency scheme, where each example carries a share of the penalty for its own features, so the average is full ℓ2 while updates stay sparse (the share is capped at 1000 to keep batch-1 steps stable; see `tasks.Rcv1LogReg`).
 
 ### Modes
 
@@ -220,9 +220,9 @@ Pilot, seed 0 only, Apple-silicon laptop with 6 performance cores (so m ≤ 4; t
 
 | Task | Mode | m | Updates/s | Time to target (s) | Epochs to target | Speed-up | Final acc | Mean τ | Gradient cosine |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| T1 | serial | 1 | 20,339 | 150.7 | 3.86 | 1.00× | 0.9480 | 0.00 | — |
-| T1 | hogwild | 2 | 40,816 | 98.4 | 5.03 | 1.53× | 0.9474 | 0.57 | 0.0036 |
-| T1 | hogwild | 4 | 79,013 | 41.9 | 4.23 | 3.60× | 0.9470 | 1.72 | 0.0037 |
+| T1 | serial | 1 | 21,131 | 129.9 | 3.50 | 1.00× | 0.9457 | 0.00 | — |
+| T1 | hogwild | 2 | 41,240 | 75.0 | 3.98 | 1.73× | 0.9457 | 0.60 | 0.0009 |
+| T1 | hogwild | 4 | 80,509 | 36.5 | 3.76 | 3.56× | 0.9446 | 1.81 | 0.0006 |
 | T2 | serial | 1 | 13,922 | 32.1 | 7.25 | 1.00× | 0.9228 | 0.00 | — |
 | T2 | hogwild | 2 | 26,668 | 15.8 | 7.67 | 2.03× | 0.9237 | 0.73 | 0.0202 |
 | T2 | hogwild | 4 | 53,441 | 10.1 | 8.89 | 3.16× | 0.9218 | 2.20 | 0.0128 |
@@ -230,21 +230,29 @@ Pilot, seed 0 only, Apple-silicon laptop with 6 performance cores (so m ≤ 4; t
 | T2 | sync | 4 | 4,989 | never | never | — | 0.9202 | 0.00 | 0.0119 |
 | T2 | backup (b=1) | 2 | 7,242 | 44.8 | 10.70 | 0.72× | 0.9226 | 0.00 | 0.0098 |
 | T2 | backup (b=1) | 4 | 4,355 | never | never | — | 0.9201 | 0.00 | 0.0235 |
-| T3a | serial | 1 | 5,932 | 63.9 | 6.25 | 1.00× | 0.9850 | 0.00 | — |
-| T3a | hogwild | 2 | 10,561 | 33.9 | 5.93 | 1.88× | 0.9839 | 0.73 | 0.0105 |
-| T3a | hogwild | 4 | 18,812 | 24.8 | 7.72 | 2.58× | 0.9838 | 2.25 | 0.0132 |
-| T3b | serial | 1 | 139 | 154.8 | 3.53 | 1.00× | 0.7409 | 0.00 | — |
-| T3b | hogwild | 2 | 279 | 81.3 | 3.61 | 1.91× | 0.7581 | 0.85 | 0.0090 |
-| T3b | hogwild | 4 | 510 | 54.5 | 4.42 | 2.84× | 0.7391 | 2.90 | 0.0156 |
+| T3a | serial | 1 | 5,958 | 62.9 | 6.24 | 1.00× | 0.9838 | 0.00 | — |
+| T3a | hogwild | 2 | 10,287 | 38.8 | 6.62 | 1.62× | 0.9831 | 0.74 | 0.0085 |
+| T3a | hogwild | 4 | 19,104 | 24.1 | 7.68 | 2.61× | 0.9821 | 2.26 | 0.0098 |
+| T3b | serial | 1 | 312 | 98.9 | 4.93 | 1.00× | 0.7330 | 0.00 | — |
+| T3b | hogwild | 2 | 597 | 49.8 | 4.74 | 1.99× | 0.7261 | 0.95 | 0.0178 |
+| T3b | hogwild | 4 | 1,122 | 32.5 | 5.87 | 3.04× | 0.7217 | 2.88 | 0.0274 |
+
+Merged from Andrew's branch (`origin/Andrew`), on top of the code above:
+
+- **Step sizes are selected on a 10% validation holdout** instead of on test loss (`python -m hogwild.tune`; the `t2@val`-style task variants). T2 and T1 kept their step sizes; T3a moved from 0.003 to 0.002.
+- **T1 uses his inverse-frequency ℓ2**, capped at 1000 because the uncapped weights are unstable at batch size 1 on the 781k split. The penalty now actually bites: serial test loss is 0.163 where it was 0.144.
+- **T3b uses his 0.3M-parameter CNN.** It is about twice as fast per update as the one it replaces.
+- **Not taken:** his standalone serial loop (serial runs under the shared runner so that it carries the same overheads as the parallel modes) and his hard-coded targets.
+- **Still open, to decide together:** batch size (1/1/1/8 here against his 32/64/64/64) and the RCV1 split (781k training documents here against his 23k). With his settings the serial runs for T1–T3a take 1–4 s, which is cheap but leaves little to time.
 
 What the pilot already shows, and what it changed in the plan:
 
-- **HOGWILD! throughput scales** (3.2–3.9× the serial update rate at m = 4 on every task) and mean τ stays below m. On all three dense tasks it needs more epochs to reach the target at m = 4 than serial does, which is the H1 prediction; one seed is not enough to call it.
+- **HOGWILD! throughput scales** (3.2–3.8× the serial update rate at m = 4 on every task) and mean τ stays below m. On all three dense tasks it needs more epochs to reach the target at m = 4 than serial does, which is the H1 prediction; one seed is not enough to call it.
 - **Sync at the serial-tuned η loses to serial on T2**: one update per round means m× fewer updates per epoch, and at m = 4 it does not reach the target within the budget. This is the README's design (no rescaling; E4 varies η), but expect many `inf` rows for sync/backup in E1 at large m. Decide before the sweep whether that is the comparison we want.
-- **RCV1 is sparse per example but its conflict graph is not**: 89% of random document pairs share at least one feature (`conflict_frac` in `configs/reference.yaml`), so the n/Δ term of the Mania et al. bound is about 1 for T1 as well. The measured gradient cosine does separate the tasks (0.004 on T1 against 0.01–0.02 on the dense tasks). §4.4 has to be argued from that, not from n/Δ.
-- **Target loss had to be redefined** (best serial epoch, not the last one) because the CIFAR CNN overfits; see §4. **T3b additionally gets 10% slack.** Against the strict target, HOGWILD! at m = 4 never got there: its best epoch has test loss 0.81 against 0.74 for serial, with the same final accuracy (73.9% vs. 74.1%). Whether that gap is a real H2 effect or one seed is exactly what E1 on T3b should answer, so report the best-epoch loss per mode next to time-to-target; the slack only keeps the time measurable. The table above uses the slackened target. Every row stores its full curves, so `python -m analysis.retarget` recomputes time-to-target for any other target without rerunning.
+- **RCV1 is sparse per example but its conflict graph is not**: 89% of random document pairs share at least one feature (`conflict_frac` in `configs/reference.yaml`), so the n/Δ term of the Mania et al. bound is about 1 for T1 as well. The measured gradient cosine does separate the tasks (under 0.001 on T1 against 0.01–0.03 on the dense tasks). §4.4 has to be argued from that, not from n/Δ.
+- **Target loss had to be redefined** (best serial epoch, not the last one) because the CIFAR CNN overfits; see §4. **T3b additionally gets 10% slack.** Without it HOGWILD! at m = 4 would not get there: its best epoch has test loss 0.835 against 0.799 for serial (strict target 0.803), and it ends 1.1 points lower in accuracy (72.2% vs. 73.3%). Whether that gap is a real H2 effect or one seed is exactly what E1 on T3b should answer, so report the best-epoch loss per mode next to time-to-target; the slack only keeps the time measurable. Every row stores its full curves, so `python -m analysis.retarget` recomputes time-to-target for any other target without rerunning.
 - **Time-to-target is a first crossing of a noisy curve**, so it is biased early (serial reaches the T2 target at epoch 7 although the target was defined at epoch 10). All modes share the bias; the seed spread will show how much it matters.
-- **Run times are longer than the 1–5 min estimate for serial runs**: about 1 min (T2), 2.5 min (T3a), 5 min (T1) and 10 min (T3b, 12 epochs) on one laptop performance core.
+- **Run times are longer than the 1–5 min estimate for serial runs**: about 1 min (T2), 2.5 min (T3a) and 5 min (T1 and T3b) on one laptop performance core.
 
 ---
 

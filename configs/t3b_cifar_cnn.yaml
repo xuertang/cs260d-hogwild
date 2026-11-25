@@ -1,4 +1,4 @@
-# T3b — CIFAR-10, 4-conv CNN, 0.25M params, dense and non-convex.
+# T3b — CIFAR-10, 4-conv CNN, 0.3M params, dense and non-convex.
 #
 # Base config: the serial reference run. Sweeps and CLI flags override
 # mode / m / b / seed / tau_inject / straggler on top of this file.
@@ -6,12 +6,13 @@
 # eta is left null on purpose: it resolves to the task's tuned default_eta in
 # configs/reference.yaml (written by `python -m hogwild.tune --task t3b ...`).
 #
-# max_epochs is 12, NOT the 1.5x-reference (30 epochs) the other tasks use.
-# This model overfits: serial test loss bottoms out at epoch 7 (the target is
-# that minimum plus 10% slack, see tasks.CifarCNN) and rises from there, so epochs 13-30 would only measure
-# overfitting while tripling the cost of the most expensive task. 12 epochs is
-# 1.7x the epoch of the minimum. final_test_acc is therefore "accuracy after
-# 12 epochs". To follow the README literally, set this back to 30.
+# max_epochs is 14, NOT the 1.5x-reference (30 epochs) the other tasks use.
+# This model overfits: serial test loss bottoms out at epoch 9 (the target is
+# that minimum plus 10% slack, see tasks.CifarCNN) and rises from there, so
+# epochs 15-30 would only measure overfitting while doubling the cost of the
+# most expensive task. 14 epochs is 1.5x the epoch of the minimum.
+# final_test_acc is therefore "accuracy after 14 epochs". To follow the README
+# literally, set this back to 30.
 
 task: t3b
 mode: serial
@@ -19,4 +20,4 @@ m: 1
 eta: null
 seed: 0
 batch_size: 8
-max_epochs: 12
+max_epochs: 14

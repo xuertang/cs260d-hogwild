@@ -56,7 +56,7 @@ def test_run_id_is_deterministic_and_seed_sensitive():
 
 
 @pytest.mark.parametrize("model, expected", [
-    (models.LogReg(47236), 47236), (models.Softmax(), 7850), (models.MLP(), 203530), (models.SmallCNN(), 245962),
+    (models.LogReg(47236), 47236), (models.Softmax(), 7850), (models.MLP(), 203530), (models.SmallCNN(), 316554),
 ])
 def test_param_counts(model, expected):
     assert sum(p.numel() for p in model.parameters()) == expected
@@ -130,6 +130,35 @@ def test_stub_task_trains():
                 p.add_(g, alpha=-0.1)
     after, acc = task.evaluate(list(model.parameters()))
     assert after < before and acc > 0.8
+
+
+def test_validation_variant_holds_out_training_data():
+    full, val = get_task("stub"), get_task("stub@val")
+    assert val.n_train == full.n_train - round(0.1 * full.n_train)
+    assert val.x_test.shape[0] == round(0.1 * full.n_train)
+    again = get_task("stub@val")
+    assert torch.equal(val.x_test, again.x_test)                 # the split is fixed
+    with pytest.raises(ValueError):
+        get_task("stub@nope")
+
+
+@pytest.mark.skipif(not (DATA_DIR / "rcv1.pt").exists(), reason="RCV1 not downloaded")
+def test_rcv1_validation_variant_is_disjoint_from_training():
+    task = get_task("t1@val")
+    assert task.n_train + task.test_y.shape[0] == 781265
+    held = set(range(781265)) - set(task.train_rows.tolist())
+    assert len(held) == task.test_y.shape[0]
+    cols, vals, local, y = next(iter(task.train_loader(0, 4)))
+    assert y.shape[0] == 4 and int(local.max()) == 3
+
+
+@pytest.mark.skipif(not (DATA_DIR / "rcv1.pt").exists(), reason="RCV1 not downloaded")
+def test_rcv1_l2_weights_are_capped_inverse_frequency():
+    task = get_task("t1")
+    counts = torch.bincount(task.idx.long(), minlength=task.num_features)
+    common = int(counts.argmax())
+    assert task.l2_weight[common] == pytest.approx(task.n_train / int(counts[common]))
+    assert float(task.l2_weight.max()) == task.L2_WEIGHT_CAP
 
 
 @pytest.mark.skipif(not (DATA_DIR / "rcv1.pt").exists(), reason="RCV1 not downloaded")

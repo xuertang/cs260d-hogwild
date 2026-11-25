@@ -67,7 +67,7 @@ Task & Model & Params & Train size & Batch & Target loss \\
 T1 RCV1 (CCAT vs.\ rest) & $\ell_2$-logistic regression & 47{,}236 & 781{,}265 & 1 & best serial epoch of 5 \\
 T2 MNIST & softmax regression & 7{,}850 & 60{,}000 & 1 & best serial epoch of 10 \\
 T3a MNIST & MLP, 256 hidden & 203{,}530 & 60{,}000 & 1 & best serial epoch of 10 \\
-T3b CIFAR-10 & 4-conv CNN & 245{,}962 & 50{,}000 & 8 & best serial epoch of 20, $+10\%$ \\
+T3b CIFAR-10 & 4-conv CNN & 316{,}554 & 50{,}000 & 8 & best serial epoch of 20, $+10\%$ \\
 \bottomrule
 \end{tabular}
 \caption{Tasks, in order of rising density and then non-convexity. Tuned step
@@ -77,14 +77,16 @@ sizes and the resulting target losses are in \texttt{configs/reference.yaml}.}
 
 % To write:
 % - T1: train on the 781k-document part of RCV1 and test on the 23k part, as in
-%   Niu et al.; l2 penalty applied to touched coordinates only (why: a dense
+%   Niu et al.; l2 penalty spread over examples by inverse feature frequency,
+%   capped at 1000 (why: a dense
 %   penalty would make every update dense). About 76 non-zeros per document.
 % - Step size: constant, chosen per task by a serial sweep (hogwild/tune.py);
-%   the same value is then used by every mode. Selected on test loss — say so.
+%   the same value is then used by every mode. Selected on a 10% validation
+%   holdout of the training set; the test set only fixes the target.
 % - Target loss: lowest per-epoch median serial test loss within the reference
 %   window (the CNN overfits, so the last epoch is not the best one), plus 10%
 %   slack on T3b only; say why (pilot: HOGWILD! at m = 4 bottoms out just above
-%   the strict value). Budget: 1.5x the reference epochs; 12 epochs for T3b.
+%   the strict value). Budget: 1.5x the reference epochs; 14 epochs for T3b.
 % - T3b loss curves are evaluated on a fixed 2,000-image subset of the test
 %   set; final accuracy uses all 10,000.
 % - Hardware.
@@ -194,7 +196,8 @@ and spread of final test accuracy.}\label{tab:repro}
 %   slots and can be off by less than m.
 % - Evaluator snapshots are not atomic; time-to-target is interpolated between
 %   snapshots.
-% - Step size and target selected on test loss; three seeds.
+% - Target defined on the test set (step size is selected on a validation
+%   holdout); three seeds.
 % - Sync uses the serial step size with an m-times larger effective batch.
 % - Backup uses b more cores than the other modes at the same m.
 

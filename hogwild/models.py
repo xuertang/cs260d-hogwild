@@ -3,7 +3,7 @@
     LogReg     T1   47,236   sparse l2-logistic regression (no bias)
     Softmax    T2    7,850   multinomial logistic regression
     MLP        T3a 203,530   784 → 256 → 10
-    SmallCNN   T3b 245,962   4 conv + linear
+    SmallCNN   T3b 316,554   4 conv + linear (Andrew's architecture)
 
 All of them are small on purpose (README §9): a few hundred KB of parameters
 keeps memory bandwidth from capping the speed-up we are trying to measure.
@@ -48,27 +48,22 @@ class MLP(nn.Module):
         return self.fc2(torch.relu(self.fc1(x.flatten(1))))
 
 
-class SmallCNN(nn.Module):
-    """(conv – relu – pool) x 4 with 32, 64, 128, 128 channels, then linear.
+class SmallCNN(nn.Sequential):
+    """Four 3x3 convolutions (32, 64, 128, 192 channels), global average pool, linear.
 
-    Pooling after every convolution keeps the cost per image low (about 13M
-    multiply-adds forward), which is what lets a CPU run finish in minutes.
+    Andrew's architecture: 316,554 parameters, the README's "0.3M". The first
+    convolution has stride 2 and each of the first three is followed by a 2x2
+    max-pool, so the feature maps are 8, 4, 2 and 2 pixels wide — about 3.5M
+    multiply-adds per image, which is what lets a CPU run finish in minutes.
     No batch norm: its running statistics would be extra shared state with
     its own races.
     """
 
     def __init__(self, classes: int = 10) -> None:
-        super().__init__()
-        self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
-        self.conv3 = nn.Conv2d(64, 128, 3, padding=1)
-        self.conv4 = nn.Conv2d(128, 128, 3, padding=1)
-        self.fc = nn.Linear(128 * 2 * 2, classes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pool = nn.functional.max_pool2d
-        x = pool(torch.relu(self.conv1(x)), 2)   # 32 → 16
-        x = pool(torch.relu(self.conv2(x)), 2)   # 16 → 8
-        x = pool(torch.relu(self.conv3(x)), 2)   # 8 → 4
-        x = pool(torch.relu(self.conv4(x)), 2)   # 4 → 2
-        return self.fc(x.flatten(1))
+        super().__init__(
+            nn.Conv2d(3, 32, 3, stride=2, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(128, 192, 3, padding=1), nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(192, classes),
+        )

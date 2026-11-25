@@ -14,6 +14,11 @@ Beyond the README contract, every task also provides
     grads(model, batch) → list of tensors aligned with model.parameters()
     share_memory()      → move the dataset into shared memory
 
+A task name may carry the suffix "@val" (e.g. "t2@val"): the same task with
+10% of the training set held out and used in place of the test set. tune.py
+selects step sizes on that variant, so the test set plays no part in tuning
+(Andrew's protocol).
+
 `grads` exists because the contract has no training loss, and because T1 needs
 a sparse gradient that autograd would not give cheaply. `share_memory` lets
 the runner hand ONE copy of the dataset to all worker processes.
@@ -42,6 +47,9 @@ warnings.filterwarnings("ignore", message="Sparse invariant checks are implicitl
 REPO = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO / "data"
 REFERENCE_PATH = REPO / "configs" / "reference.yaml"
+
+
+HOLDOUT_FRAC, HOLDOUT_SEED = 0.10, 0     # the "@val" variant
 
 
 def load_reference() -> dict[str, dict]:
@@ -120,6 +128,12 @@ class BaseTask:
         coordinate. 1.0 for every dense model; overridden by the sparse task."""
         return 1.0
 
+    def use_holdout(self, frac: float = HOLDOUT_FRAC, seed: int = HOLDOUT_SEED) -> "BaseTask":
+        """Turn this task into its validation variant: hold out `frac` of the
+        training set (fixed by `seed`), train on the rest, and make `evaluate`
+        score the held-out part instead of the test set."""
+        raise NotImplementedError
+
     # -- helpers ----------------------------------------------------------- #
 
     def _evaluate(self, model: torch.nn.Module, n: int | None) -> tuple[float, float]:
@@ -138,6 +152,13 @@ class BaseTask:
         state = dict(self.__dict__)
         state["_eval_model"] = None
         return state
+
+
+def _holdout_split(n: int, frac: float, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """(held-out indices, kept indices), a fixed random split of range(n)."""
+    perm = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
+    k = int(round(frac * n))
+    return perm[:k], perm[k:]
 
 
 def _batches(n: int, seed: int, batch_size: int) -> Iterator[torch.Tensor]:
@@ -165,6 +186,13 @@ class DenseClassification(BaseTask):
     def train_loader(self, seed: int, batch_size: int) -> Iterable:
         for idx in _batches(self.n_train, seed, batch_size):
             yield self.x_train[idx], self.y_train[idx]
+
+    def use_holdout(self, frac: float = HOLDOUT_FRAC, seed: int = HOLDOUT_SEED):
+        hold, keep = _holdout_split(self.n_train, frac, seed)
+        self.x_test, self.y_test = self.x_train[hold], self.y_train[hold]
+        self.x_train, self.y_train = self.x_train[keep], self.y_train[keep]
+        self.n_train = keep.numel()
+        return self
 
     def loss(self, model, batch) -> torch.Tensor:
         x, y = batch
@@ -212,8 +240,8 @@ class CifarCNN(DenseClassification):
     eval_batch = 250          # larger batches thrash the cache on one thread
     curve_eval_n = 2000       # a full 10k pass takes several seconds on one core
     # The target here is the bottom of an overfitting curve. In the pilot,
-    # HOGWILD! at m = 4 bottomed out 0.06 higher than serial and so never
-    # crossed the strict target, which would leave the T3b panel of the
+    # HOGWILD! at m = 4 bottomed out at 0.835 against 0.799 for serial, above
+    # the strict target of 0.803, which would leave the T3b panel of the
     # primary figure empty. 10% slack keeps time-to-target a measurement.
     target_slack = 0.10
 
@@ -239,15 +267,32 @@ class Rcv1LogReg(BaseTask):
     Split: as in the HOGWILD! paper we train on the large part (781,265 docs,
     scikit-learn's "test" subset) and test on the small one (23,149 docs).
 
-    l2 term: applied only to the coordinates the minibatch touches,
-        loss = mean_i [ logloss(w·x_i, y_i) + (l2 / 2) * sum_{j in x_i} w_j^2 ].
-    A dense (l2/2)||w||^2 would make every update touch all 47k coordinates
-    and the task would stop being sparse. The reported test loss is the plain
-    log-loss, without the penalty.
+    l2 term (Andrew's inverse-frequency scheme, with a cap). A dense
+    (l2/2)||w||^2 would make every update touch all 47k coordinates and the
+    task would stop being sparse, so the penalty is spread over the examples
+    instead: an example that contains feature j carries
+
+        (l2 / 2) * k_j * w_j^2,     k_j = min(n / count_j, L2_WEIGHT_CAP),
+
+    where count_j is the number of training documents containing j. With
+    k_j = n / count_j exactly, the mean over the training set is the full
+    (l2/2) * sum_j w_j^2 over observed features, and each gradient still
+    touches only the example's own coordinates.
+
+    Why the cap: one SGD step multiplies w_j by (1 - eta * l2 * k_j / batch).
+    Uncapped, a feature seen in a single document has k_j = 781,265, and at
+    batch size 1 that factor is far below -1 for any useful eta: the weight
+    flips sign and grows every time the feature appears. (On Andrew's branch
+    n is 23k and the batch is 32, which keeps it stable.) With the cap at
+    1000, features in at least 782 documents — 93% of all non-zeros — get the
+    full penalty and rarer ones proportionally less.
+
+    The reported test loss is the plain log-loss, without the penalty.
     """
 
     name, ref_epochs, fallback_eta = "t1", 5, 0.5
     l2 = 1e-5
+    L2_WEIGHT_CAP = 1000.0
 
     def __init__(self) -> None:
         super().__init__()
@@ -255,6 +300,9 @@ class Rcv1LogReg(BaseTask):
         self.num_features: int = d["num_features"]
         self.ptr, self.idx, self.val, self.y = d["train_ptr"], d["train_idx"], d["train_val"], d["train_y"]
         self.n_train = self.y.shape[0]
+        self.train_rows: torch.Tensor | None = None      # None = every row; set by use_holdout
+        counts = torch.bincount(self.idx.long(), minlength=self.num_features).clamp_min(1)
+        self.l2_weight = (self.n_train / counts.float()).clamp_max(self.L2_WEIGHT_CAP)   # k_j
         # Test set kept in COO form so evaluation is one index_add.
         t_ptr = d["test_ptr"]
         self.test_cols, self.test_val, self.test_y = d["test_idx"].long(), d["test_val"], d["test_y"]
@@ -278,14 +326,23 @@ class Rcv1LogReg(BaseTask):
 
     def train_loader(self, seed: int, batch_size: int) -> Iterable:
         for rows in _batches(self.n_train, seed, batch_size):
+            if self.train_rows is not None:
+                rows = self.train_rows[rows]
             cols, vals, local = self._gather(rows)
             yield cols, vals, local, self.y[rows]
+
+    def use_holdout(self, frac: float = HOLDOUT_FRAC, seed: int = HOLDOUT_SEED):
+        hold, keep = _holdout_split(self.n_train, frac, seed)
+        self.test_cols, self.test_val, self.test_rows = self._gather(hold)
+        self.test_y = self.y[hold]
+        self.train_rows, self.n_train = keep, keep.numel()
+        return self
 
     def loss(self, model, batch) -> torch.Tensor:
         cols, vals, local, y = batch
         z = model(cols, vals, local, y.shape[0])
         fit = torch.nn.functional.binary_cross_entropy_with_logits(z, y)
-        return fit + 0.5 * self.l2 * (model.weight[cols] ** 2).sum() / y.shape[0]
+        return fit + 0.5 * self.l2 * (self.l2_weight[cols] * model.weight[cols] ** 2).sum() / y.shape[0]
 
     def grads(self, model, batch) -> list[torch.Tensor]:
         """Closed-form gradient of `loss`, returned as a sparse COO vector so the
@@ -296,7 +353,7 @@ class Rcv1LogReg(BaseTask):
         w = model.weight.detach()[cols]                 # read: only the touched coordinates
         z = torch.zeros(n).index_add_(0, local, w * vals)
         resid = (torch.sigmoid(z) - y) / n
-        g = resid[local] * vals + (self.l2 / n) * w
+        g = resid[local] * vals + (self.l2 / n) * self.l2_weight[cols] * w
         return [torch.sparse_coo_tensor(cols.unsqueeze(0), g, (self.num_features,), check_invariants=False)]
 
     def _evaluate(self, model, n) -> tuple[float, float]:
@@ -351,10 +408,12 @@ TASKS = {"t1": Rcv1LogReg, "t2": MnistSoftmax, "t3a": MnistMLP, "t3b": CifarCNN,
 
 
 def get_task(name: str) -> BaseTask:
-    try:
-        return TASKS[name]()
-    except KeyError:
-        raise ValueError(f"unknown task {name!r}; expected one of {sorted(TASKS)}") from None
+    """`name` is a key of TASKS, optionally followed by "@val" for the validation variant."""
+    base, _, variant = name.partition("@")
+    if base not in TASKS or variant not in ("", "val"):
+        raise ValueError(f"unknown task {name!r}; expected one of {sorted(TASKS)}, optionally with '@val'")
+    task = TASKS[base]()
+    return task.use_holdout() if variant == "val" else task
 
 
 # --------------------------------------------------------------------------- #
