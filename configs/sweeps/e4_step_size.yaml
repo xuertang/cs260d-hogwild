@@ -1,9 +1,12 @@
 # E4 — step size (tests H1). README §5.
 # Format: see the header of e1_scaling.yaml.
 #
-# sync and hogwild at m = 8, eta at 0.5x and 2x the serial-tuned value. The 1x
-# point is not repeated here: it is the m = 8 column of E1.
+# sync and hogwild at m = 8, eta at 0.5x and 2x the step each mode uses in E1.
+# The 1x point is not repeated here: it is the m = 8 column of E1.
 #   4 tasks x 2 modes x 2 eta x 3 seeds = 48
+#
+# E1's step is the serial-tuned eta for hogwild and m = 8 times that for sync
+# (see the header of e1_scaling.yaml), so sync's 0.5x / 2x are eta_mult 4 / 16.
 #
 # First experiment to cut if the sweep overruns.
 
@@ -12,11 +15,16 @@ seeds: [0, 1, 2]
 expected_runs: 48
 
 grids:
-  - base:
+  - base: &all_tasks
       - configs/t1_rcv1_logreg.yaml
       - configs/t2_mnist_softmax.yaml
       - configs/t3a_mnist_mlp.yaml
       - configs/t3b_cifar_cnn.yaml
-    mode: [sync, hogwild]
+    mode: [hogwild]
     m: [8]
     eta_mult: [0.5, 2.0]
+
+  - base: *all_tasks
+    mode: [sync]
+    m: [8]
+    eta_mult: [4.0, 16.0]

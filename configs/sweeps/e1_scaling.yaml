@@ -15,6 +15,14 @@
 #   serial:      4 tasks x 3 seeds                    =  12
 #   multi-worker: 4 tasks x 3 modes x 4 m x 3 seeds   = 144
 #
+# Step size. serial and hogwild use the serial-tuned eta. sync and backup use
+# eta_mult = m (linear scaling): a round averages m gradients into ONE update,
+# so at the serial eta these modes make m times fewer updates of the same size
+# per epoch and cannot reach the target inside the epoch budget for m >= 4
+# (the first full sweep, Nov 25: 0/3 seeds on every task). With eta_mult = m
+# a round moves as far as the m serial steps it replaces. That is why sync and
+# backup have one block per m below.
+#
 # Cut if time runs short (after E4): the m = 2 column.
 
 name: e1_scaling
@@ -31,10 +39,17 @@ grids:
     m: [1]
 
   - base: *all_tasks
-    mode: [sync, hogwild]
+    mode: [hogwild]
     m: [2, 4, 8, 16]
 
-  - base: *all_tasks
-    mode: [backup]
-    b: [1]
-    m: [2, 4, 8, 16]   # backup at m = 16 runs 17 processes — check the core map
+  # sync: eta_mult = m.
+  - {base: *all_tasks, mode: [sync], m: [2],  eta_mult: [2]}
+  - {base: *all_tasks, mode: [sync], m: [4],  eta_mult: [4]}
+  - {base: *all_tasks, mode: [sync], m: [8],  eta_mult: [8]}
+  - {base: *all_tasks, mode: [sync], m: [16], eta_mult: [16]}
+
+  # backup (b = 1): eta_mult = m, the quorum size — the b extra gradients are dropped.
+  - {base: *all_tasks, mode: [backup], b: [1], m: [2],  eta_mult: [2]}
+  - {base: *all_tasks, mode: [backup], b: [1], m: [4],  eta_mult: [4]}
+  - {base: *all_tasks, mode: [backup], b: [1], m: [8],  eta_mult: [8]}
+  - {base: *all_tasks, mode: [backup], b: [1], m: [16], eta_mult: [16]}   # 17 processes — check the core map

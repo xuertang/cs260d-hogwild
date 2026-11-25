@@ -122,7 +122,7 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 | **E1** scaling    | H1, H2 | T1, T2, T3a, T3b | serial; sync, backup(b=1), hogwild             | m ∈ {2, 4, 8, 16}               | 3         | 12 + 144 = **156** |
 | **E2** injected τ | H2     | T3a, T3b         | hogwild, m = 8                                 | τ ∈ {8, 32, 128} × {η, η/(1+τ)} | 3         | **36**             |
 | **E3** stragglers | H3     | T2, T3a          | sync, backup(b=1), backup(b=2), hogwild, m = 8 | tail ∈ {mild, heavy}            | 3         | **48**             |
-| **E4** step size  | H1     | T1–T3b           | sync, hogwild, m = 8                           | η ∈ {0.5×, 2×}                  | 3         | **48**             |
+| **E4** step size  | H1     | T1–T3b           | sync, hogwild, m = 8                           | η ∈ {0.5×, 2×} of the mode's E1 step | 3    | **48**             |
 |                   |        |                  |                                                |                                 | **Total** | **≈ 290**          |
 
 Runs take 1–5 min each on CPU. Sequential total ≈ 15 h; two sweeps in parallel on a 32-vCPU VM ≈ 8–10 h wall. **If time runs short, cut in this order:** E4 → m = 2 column of E1 → T3b from E3.
@@ -152,7 +152,7 @@ What the implementation settled where the contract was silent (all additive, not
 - `Config.task` is `t1` / `t2` / `t3a` / `t3b`. In YAML, `eta: null` means "the task's tuned η" and `eta_mult` scales it (E4).
 - Curve points are `(epochs, test_loss)` and `(seconds, test_loss)`. A run that never reaches the target has `time_to_target_s = epochs_to_target = inf`.
 - `param_dist_to_seed0` is the L2 distance to the final parameters of the same config at seed 0; sweeps keep the parameters in `results/params/`.
-- `sync` uses the tuned η unchanged with an m-times larger effective batch (one update per round); `backup` is the same round logic with b extra workers.
+- `sync` makes one update per round from an m-times larger effective batch; `backup` is the same round logic with b extra workers. The mode itself applies `cfg.eta` as given, and the sweeps set `eta_mult = m` for both (linear scaling), so a round moves as far as the m serial steps it replaces. At the unscaled serial η they make m× fewer updates per epoch and did not reach the target for m ≥ 4 on any task (first full sweep, Nov 25).
 
 ```python
 class Task:                       # tasks.py
@@ -248,7 +248,7 @@ Merged from Andrew's branch (`origin/Andrew`), on top of the code above:
 What the pilot already shows, and what it changed in the plan:
 
 - **HOGWILD! throughput scales** (3.2–3.8× the serial update rate at m = 4 on every task) and mean τ stays below m. On all three dense tasks it needs more epochs to reach the target at m = 4 than serial does, which is the H1 prediction; one seed is not enough to call it.
-- **Sync at the serial-tuned η loses to serial on T2**: one update per round means m× fewer updates per epoch, and at m = 4 it does not reach the target within the budget. This is the README's design (no rescaling; E4 varies η), but expect many `inf` rows for sync/backup in E1 at large m. Decide before the sweep whether that is the comparison we want.
+- **Sync at the serial-tuned η loses to serial on T2**: one update per round means m× fewer updates per epoch, and at m = 4 it does not reach the target within the budget. This is the README's design (no rescaling; E4 varies η), but expect many `inf` rows for sync/backup in E1 at large m. Decide before the sweep whether that is the comparison we want. *(Nov 25, after the first full sweep confirmed it: the sweeps now run sync/backup at m × η, see §6.)*
 - **RCV1 is sparse per example but its conflict graph is not**: 89% of random document pairs share at least one feature (`conflict_frac` in `configs/reference.yaml`), so the n/Δ term of the Mania et al. bound is about 1 for T1 as well. The measured gradient cosine does separate the tasks (under 0.001 on T1 against 0.01–0.03 on the dense tasks). §4.4 has to be argued from that, not from n/Δ.
 - **Target loss had to be redefined** (best serial epoch, not the last one) because the CIFAR CNN overfits; see §4. **T3b additionally gets 10% slack.** Without it HOGWILD! at m = 4 would not get there: its best epoch has test loss 0.835 against 0.799 for serial (strict target 0.803), and it ends 1.1 points lower in accuracy (72.2% vs. 73.3%). Whether that gap is a real H2 effect or one seed is exactly what E1 on T3b should answer, so report the best-epoch loss per mode next to time-to-target; the slack only keeps the time measurable. Every row stores its full curves, so `python -m analysis.retarget` recomputes time-to-target for any other target without rerunning.
 - **Time-to-target is a first crossing of a noisy curve**, so it is biased early (serial reaches the T2 target at epoch 7 although the target was defined at epoch 10). All modes share the bias; the seed spread will show how much it matters.

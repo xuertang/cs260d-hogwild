@@ -28,8 +28,10 @@ computing, its gradient is rejected at the round check.
 
 Accounting (agreed with the HOGWILD! mode): cfg.batch_size is per worker, so
 one round applies m * batch_size examples in ONE update, where HOGWILD! makes
-m updates from the same examples. eta is used as configured — it is not
-rescaled by m; E4 is the experiment that varies it.
+m updates from the same examples. This mode uses cfg.eta as configured and
+does not rescale it. The sweeps do: configs/sweeps/*.yaml set eta_mult = m for
+sync and backup, because at the serial-tuned eta a round is one serial-sized
+step and m times fewer of them fit in the epoch budget.
 """
 
 from __future__ import annotations

@@ -10,6 +10,9 @@
 #
 # Note for the write-up: backup uses m + b = 9 or 10 processes against 8 for
 # sync and hogwild.
+#
+# Step size: sync and backup use eta_mult = m = 8, as in E1 (see the header of
+# e1_scaling.yaml), so the no-straggler point of each curve is the E1 run.
 
 name: e3_stragglers
 seeds: [0, 1, 2]
@@ -19,12 +22,19 @@ grids:
   - base: &e3_tasks
       - configs/t2_mnist_softmax.yaml
       - configs/t3a_mnist_mlp.yaml
-    mode: [sync, hogwild]
+    mode: [hogwild]
     m: [8]
+    straggler: [mild, heavy]
+
+  - base: *e3_tasks
+    mode: [sync]
+    m: [8]
+    eta_mult: [8]
     straggler: [mild, heavy]
 
   - base: *e3_tasks
     mode: [backup]
     b: [1, 2]
     m: [8]
+    eta_mult: [8]
     straggler: [mild, heavy]

@@ -114,7 +114,8 @@ their average. \emph{Backup} runs $m+b$ workers and closes a round as soon as
 $m$ gradients have arrived; the remaining $b$ are discarded, never applied
 late, so staleness stays zero. With per-worker batch size $B$, a sync round
 makes one update from $mB$ examples where HOGWILD! makes $m$ updates from the
-same examples; the step size is the same in both.
+same examples. HOGWILD! uses the serial step size $\eta$; sync and backup
+use $m\eta$, so that a round moves as far as the $m$ serial steps it replaces.
 
 \paragraph{Staleness.}
 A shared version counter holds one slot per worker; a worker increments only
@@ -164,7 +165,8 @@ factor of worker step times (E3).}{fig:e3}
 
 \subsection{Step-size sensitivity}  % E4; supports H1
 \fig{e4_step_size}{\linewidth}{Sync and HOGWILD! at $0.5\times$, $1\times$
-and $2\times$ the serial step size, $m = 8$ (E4).}{fig:e4}
+and $2\times$ the step size each mode uses in E1 ($\eta$ for HOGWILD!,
+$m\eta$ for sync), $m = 8$ (E4).}{fig:e4}
 
 \subsection{Theory check}  % owner: D
 \fig{bound_check}{0.8\linewidth}{Measured slowdown in epochs-to-target
@@ -198,7 +200,8 @@ and spread of final test accuracy.}\label{tab:repro}
 %   snapshots.
 % - Target defined on the test set (step size is selected on a validation
 %   holdout); three seeds.
-% - Sync uses the serial step size with an m-times larger effective batch.
+% - Sync and backup use m times the serial step size (linear scaling, not
+%   re-tuned per m) with an m-times larger effective batch.
 % - Backup uses b more cores than the other modes at the same m.
 
 % =========================================================================

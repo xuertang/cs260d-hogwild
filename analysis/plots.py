@@ -1104,26 +1104,33 @@ def fig_e3_straggler_crossover(df: pd.DataFrame) -> Path:
 
 
 def eta_multiplier(df: pd.DataFrame, rows: pd.DataFrame, task: str) -> pd.Series | None:
-    """eta of `rows` (one task) as a multiple of the task's serial-tuned eta.
+    """eta of `rows` (one task) as a multiple of the step the same mode uses in E1 at the same m.
 
-    Base eta: the (median) eta of the task's E1 rows. Without E1 rows, if the
-    rows carry exactly two etas a factor 4 apart (the 0.5x / 2x grid), their
-    geometric mean is used and a note is printed. Returns None otherwise.
-    results/reference.jsonl is deliberately not consulted: it is the tuning
-    grid, so its rows carry several etas per task.
+    The base is per (mode, m), not per task: sync and backup run E1 at m times
+    the serial-tuned eta (configs/sweeps/e1_scaling.yaml), hogwild at the
+    serial-tuned eta itself, so "1x" is a different eta for each of them.
+
+    Base eta: the (median) eta of the task's E1 rows for that mode and m.
+    Without such rows, if the group carries exactly two etas a factor 4 apart
+    (the 0.5x / 2x grid), their geometric mean is used and a note is printed.
+    Returns None otherwise. results/reference.jsonl is deliberately not
+    consulted: it is the tuning grid, so its rows carry several etas per task.
     """
     e1 = e1_rows(df)
-    cand = e1.loc[e1["task"] == task, "eta"]
-    if len(cand):
-        base = float(cand.median())
-    else:
-        etas = sorted(float(e) for e in pd.unique(rows["eta"]))
-        if len(etas) == 2 and abs(etas[1] / etas[0] - 4.0) < 0.05:
-            base = math.sqrt(etas[0] * etas[1])
-            print(f"[e4] note: no E1 rows for {task}; assuming its etas are 0.5× and 2× of {base:g}")
+    e1 = e1[e1["task"] == task]
+    mult = pd.Series(float("nan"), index=rows.index)
+    for (mode, m), g in rows.groupby(["mode_label", "m"], sort=False):
+        cand = e1.loc[(e1["mode_label"] == mode) & (e1["m"] == m), "eta"]
+        if len(cand):
+            base = float(cand.median())
         else:
-            return None
-    mult = rows["eta"].astype(float) / base
+            etas = sorted(float(e) for e in pd.unique(g["eta"]))
+            if len(etas) == 2 and abs(etas[1] / etas[0] - 4.0) < 0.05:
+                base = math.sqrt(etas[0] * etas[1])
+                print(f"[e4] note: no E1 rows for {task} {mode} m={m}; assuming its etas are 0.5× and 2× of {base:g}")
+            else:
+                return None
+        mult[g.index] = g["eta"].astype(float) / base
     snapped = mult.copy()
     for nice in (0.25, 0.5, 1.0, 2.0, 4.0):  # absorb float noise from the sweep's multiplication
         snapped[(mult / nice - 1).abs() < 0.02] = nice
@@ -1134,8 +1141,8 @@ def eta_multiplier(df: pd.DataFrame, rows: pd.DataFrame, task: str) -> pd.Series
 def fig_e4_step_size(df: pd.DataFrame) -> Path:
     """Sensitivity to eta in {0.5x, 1x, 2x} for sync vs. hogwild at m = 8 (1x from E1).
 
-    The multiplier is recovered as eta / (eta of the task's E1 rows); see
-    eta_multiplier() for the fallbacks when E1 is missing.
+    The multiplier is recovered as eta / (eta of the same mode's E1 rows at
+    this m); see eta_multiplier() for the fallbacks when E1 is missing.
     """
     name = "e4_step_size"
     df = _prep(df)
@@ -1156,8 +1163,9 @@ def fig_e4_step_size(df: pd.DataFrame) -> Path:
         panels[task] = rows.assign(eta_mult=mult)
     if not panels:
         return placeholder_figure(name, "E4 rows present but no eta multiplier could be recovered")
-    return _lines_vs_x(panels, "eta_mult", {}, r"step size  η / η$_{\mathrm{serial}}$", name,
-                       note=f"m = {m_sel}; the 1× point is the E1 run.")
+    return _lines_vs_x(panels, "eta_mult", {}, r"step size  η / η$_{\mathrm{E1}}$", name,
+                       note=f"m = {m_sel}; the 1× point is the E1 run "
+                            f"(η$_{{\\mathrm{{E1}}}}$ = serial-tuned η for hogwild, m times that for sync).")
 
 
 @_styled
