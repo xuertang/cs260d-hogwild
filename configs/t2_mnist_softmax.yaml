@@ -1,7 +1,19 @@
+# T2 — MNIST, softmax regression, 7.8k params, dense and convex.
+#
+# Base config: the serial reference run. Sweeps and CLI flags override
+# mode / m / b / seed / tau_inject / straggler on top of this file.
+#
+# eta is left null on purpose: it resolves to the task's tuned default_eta in
+# configs/reference.yaml (written by `python -m hogwild.tune --task t2 ...`).
+#
+# max_epochs is 1.5x the reference length (10 epochs). The target loss is
+# the serial loss at 10 epochs, so a run needs headroom to reach it when
+# it is less efficient per epoch than serial.
+
 task: t2
 mode: serial
 m: 1
-eta: 0.025
+eta: null
 seed: 0
-batch_size: 64
-max_epochs: 10
+batch_size: 1
+max_epochs: 15

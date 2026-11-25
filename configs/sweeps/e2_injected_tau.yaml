@@ -5,10 +5,9 @@
 # the serial-tuned eta and at eta / (1 + tau).
 #   2 tasks x 3 tau x 2 step-size rules x 3 seeds = 36
 #
-# BLOCKED on the injection mechanism: "wait until the version advances K" as
-# written in the README cannot make progress for K >= m (see the warning on
-# hogwild/instrument.py: wait_for_staleness). Do not launch until that is
-# settled, and plot against MEASURED tau, not these nominal values.
+# tau_inject is a target, not a guarantee: staleness is injected with a delay
+# queue (hogwild/instrument.py: DelayQueue) and the achieved value is whatever
+# the run's tau histogram says. Plot against the MEASURED tau.
 
 name: e2_injected_tau
 seeds: [0, 1, 2]

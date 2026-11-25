@@ -1,13 +1,13 @@
 # E1 — scaling (tests H1, H2). README §5.
 #
-# PROPOSED sweep format (stream C owns it; hogwild/sweep.py is the only reader):
+# Sweep format (hogwild/sweep.py is the only reader):
 #
 #   name            label for logs
 #   seeds           crossed with every grid block
 #   expected_runs   sweep.expand() asserts it produces exactly this many Configs
 #   grids           list of blocks; each block is a cartesian product of its
 #                   list-valued fields. `base` names per-task config files
-#                   (configs/t*.yaml, stream B — not created yet), every other
+#                   (configs/t*.yaml), every other
 #                   key is a Config field override.
 #   eta_mult        not a Config field: multiplies the base config's eta.
 #

@@ -1,0 +1,82 @@
+# Written by `python -m hogwild.tune`. Serial reference values per task.
+t1:
+  batch_size: 1
+  conflict_frac: 0.8937
+  default_eta: 0.3
+  eta_grid:
+  - 0.1
+  - 0.3
+  - 1.0
+  - 3.0
+  n_train: 781265
+  ref_epochs: 5
+  selected_on: 10% validation holdout, seed 0, 5 epochs
+  serial_best_loss: 0.16255
+  serial_final_acc: 0.9455
+  serial_wall_s: 183.2
+  target_epoch: 5
+  target_loss: 0.16255
+  target_slack: 0.0
+  val_best_loss: 0.15255
+t2:
+  batch_size: 1
+  conflict_frac: 1.0
+  default_eta: 0.0003
+  eta_grid:
+  - 5.0e-05
+  - 0.0001
+  - 0.0002
+  - 0.0003
+  - 0.001
+  - 0.003
+  - 0.01
+  n_train: 60000
+  ref_epochs: 10
+  selected_on: 10% validation holdout, seed 0, 10 epochs
+  serial_best_loss: 0.27335
+  serial_final_acc: 0.9197
+  serial_wall_s: 49.0
+  target_epoch: 10
+  target_loss: 0.27335
+  target_slack: 0.0
+  val_best_loss: 0.29822
+t3a:
+  batch_size: 1
+  conflict_frac: 1.0
+  default_eta: 0.002
+  eta_grid:
+  - 0.0003
+  - 0.001
+  - 0.002
+  - 0.003
+  - 0.01
+  - 0.03
+  n_train: 60000
+  ref_epochs: 10
+  selected_on: 10% validation holdout, seed 0, 10 epochs
+  serial_best_loss: 0.05999
+  serial_final_acc: 0.9825
+  serial_wall_s: 100.2
+  target_epoch: 10
+  target_loss: 0.05999
+  target_slack: 0.0
+  val_best_loss: 0.07463
+t3b:
+  batch_size: 8
+  conflict_frac: 1.0
+  default_eta: 0.01
+  eta_grid:
+  - 0.003
+  - 0.01
+  - 0.03
+  - 0.1
+  n_train: 50000
+  ref_epochs: 20
+  selected_on: 10% validation holdout, seed 0, 10 epochs
+  serial_best_loss: 0.80317
+  serial_final_acc: 0.7142
+  serial_wall_s: 400.3
+  target_epoch: 9
+  target_loss: 0.88348
+  target_slack: 0.1
+  val_best_loss: 0.83978

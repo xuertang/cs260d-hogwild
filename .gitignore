@@ -21,3 +21,6 @@ report/*.out
 report/*.bbl
 report/*.blg
 report/*.synctex.gz
+
+# Figures built from fake rows (python -m analysis.plots --synthetic): never commit
+report/figures/synthetic/

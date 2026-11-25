@@ -1,282 +1,497 @@
-"""
-Role B Task 
+"""Task registry: data, model, training gradient, evaluation (README §4).
 
-Dataset loading, objectives, and evaluation for the benchmark tasks.
+    t1    RCV1 binary (CCAT vs. rest)   l2-logistic regression    sparse
+    t2    MNIST                         softmax regression        dense, convex
+    t3a   MNIST                         2-layer MLP               dense, non-convex
+    t3b   CIFAR-10                      4-conv CNN                dense, non-convex
+    stub  synthetic linear regression   (smoke tests only, never reported)
 
-Loads the datasets, shuffles training batches reproducibly, and calculates test loss and accuracy. RCV1’s feature gradients stay sparse so it can serve as the sparse baseline.
+    python -m hogwild.tasks download     # fetch + convert everything into ./data
+    python -m hogwild.tasks info         # sizes, parameter counts, reference values
 
-Loads dataset from data/ folder. 
+Beyond the README contract, every task also provides
+
+    grads(model, batch) → list of tensors aligned with model.parameters()
+    share_memory()      → move the dataset into shared memory
+
+A task name may carry the suffix "@val" (e.g. "t2@val"): the same task with
+10% of the training set held out and used in place of the test set. tune.py
+selects step sizes on that variant, so the test set plays no part in tuning
+(Andrew's protocol).
+
+`grads` exists because the contract has no training loss, and because T1 needs
+a sparse gradient that autograd would not give cheaply. `share_memory` lets
+the runner hand ONE copy of the dataset to all worker processes.
+
+target_loss and default_eta are not hard-coded: they come from
+configs/reference.yaml, which `python -m hogwild.tune` writes from serial runs.
 """
 
 from __future__ import annotations
 
-import argparse
-from collections.abc import Iterable, Iterator
-from functools import cached_property
+import sys
+import warnings
 from pathlib import Path
+from typing import Iterable, Iterator
 
 import torch
-from torch import nn
-from torch.nn import functional as F
+import yaml
 
-from hogwild.models import LogReg, MLP, SmallCNN, Softmax
-from hogwild.schema import Task
+from hogwild import models
 
+# torch warns once per process that sparse tensors are built without invariant
+# checks. That is deliberate here (the column ids come straight from the
+# dataset and the check would run on every step), so keep worker logs clean.
+warnings.filterwarnings("ignore", message="Sparse invariant checks are implicitly disabled")
 
-DATA_ROOT = Path(__file__).resolve().parents[1] / "data"
-
-
-class ClassificationTask:
-    def __init__(self, data_root: str | Path = DATA_ROOT) -> None:
-        self.data_root = Path(data_root)
-
-    def train_loader(self, seed: int, batch_size: int) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
-        """Yield one independently shuffled pass over the training split."""
-        generator = torch.Generator().manual_seed(seed)
-        order = torch.randperm(self.train_size, generator=generator)
-        return self._batches(train=True, batch_size=batch_size, order=order)
-
-    def loss(self, model: nn.Module, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        return F.cross_entropy(model(x), y)
-
-    def _test_objective(self, model, x, y) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = model(x)
-        return F.cross_entropy(logits, y, reduction="sum"), logits.argmax(dim=1)
-
-    def _test_penalty(self, model: nn.Module) -> float:
-        return 0.0
-
-    @torch.no_grad()
-    def evaluate(self, params: Iterable[torch.Tensor]) -> tuple[float, float]:
-        """Score the test split using tensors in model.parameters() order."""
-        with torch.random.fork_rng(devices=[]):
-            model = self.model()
-        for local, supplied in zip(model.parameters(), params, strict=True):
-            if local.shape != supplied.shape:
-                raise ValueError("Evaluation parameter shapes do not match the model")
-            local.copy_(supplied)
-        model.eval()
-
-        total_loss = correct = count = 0
-        for x, y in self._batches(train=False, batch_size=self.eval_batch_size):
-            loss, predicted = self._test_objective(model, x, y)
-            total_loss += loss.item()
-            correct += (predicted == y).sum().item()
-            count += y.numel()
-        return total_loss / count + self._test_penalty(model), correct / count
+REPO = Path(__file__).resolve().parent.parent
+DATA_DIR = REPO / "data"
+REFERENCE_PATH = REPO / "configs" / "reference.yaml"
 
 
-class RCV1Task(ClassificationTask):
-    name = "t1"
-    default_eta = 1.0
-    target_loss = 0.3411427186015997
-    eval_batch_size = 4096
-    l2 = 1e-4
+HOLDOUT_FRAC, HOLDOUT_SEED = 0.10, 0     # the "@val" variant
 
-    def _fetch(self, subset: str, download: bool = False):
+
+def load_reference() -> dict[str, dict]:
+    """configs/reference.yaml as a dict (empty if tuning has not been run)."""
+    if not REFERENCE_PATH.exists():
+        return {}
+    with open(REFERENCE_PATH) as f:
+        return yaml.safe_load(f) or {}
+
+
+# --------------------------------------------------------------------------- #
+# Base class
+# --------------------------------------------------------------------------- #
+
+
+class BaseTask:
+    name: str = ""
+    ref_epochs: int = 1          # target loss = best serial test loss within this many epochs (tune.py)
+    fallback_eta: float = 0.01   # used only until configs/reference.yaml has a tuned value
+    n_train: int = 0
+    curve_eval_n: int | None = None   # None = loss curves use the full test set
+    target_slack: float = 0.0         # target loss = (1 + slack) x best serial loss (tune.py)
+
+    def __init__(self) -> None:
+        ref = load_reference().get(self.name, {})
+        self.default_eta: float = float(ref.get("default_eta", self.fallback_eta))
+        # NaN = "not tuned yet": the runner then reports time_to_target as inf.
+        self.target_loss: float = float(ref.get("target_loss", float("nan")))
+        self._eval_model: torch.nn.Module | None = None
+
+    # -- contract ---------------------------------------------------------- #
+
+    def model(self) -> torch.nn.Module:
+        raise NotImplementedError
+
+    def train_loader(self, seed: int, batch_size: int) -> Iterable:
+        """One pass over the training set in an order fixed by `seed`.
+        The last incomplete batch is dropped, so every batch has batch_size examples."""
+        raise NotImplementedError
+
+    def evaluate(self, params) -> tuple[float, float]:
+        """(test_loss, test_acc) on the full test set, for `params`: tensors in
+        model().parameters() order."""
+        model = self._model_with(params)
+        with torch.no_grad():
+            return self._evaluate(model, None)
+
+    def evaluate_curve(self, params) -> tuple[float, float]:
+        """What the evaluator calls for every point of the loss curves, and so
+        what target_loss is defined on. Same as `evaluate` unless the task sets
+        `curve_eval_n`, in which case only the first curve_eval_n test examples
+        are used — for tasks where a full pass takes longer than the 2 s
+        evaluation period."""
+        model = self._model_with(params)
+        with torch.no_grad():
+            return self._evaluate(model, self.curve_eval_n)
+
+    # -- extensions -------------------------------------------------------- #
+
+    def loss(self, model: torch.nn.Module, batch) -> torch.Tensor:
+        raise NotImplementedError
+
+    def grads(self, model: torch.nn.Module, batch) -> list[torch.Tensor]:
+        """Gradient of the minibatch loss, one tensor per parameter.
+        Fresh tensors every call, so callers may keep them (delay queue)."""
+        return list(torch.autograd.grad(self.loss(model, batch), list(model.parameters())))
+
+    def share_memory(self) -> "BaseTask":
+        for value in vars(self).values():
+            if isinstance(value, torch.Tensor):
+                value.share_memory_()
+        return self
+
+    def conflict_frac(self, pairs: int = 20000, seed: int = 0) -> float:
+        """Probability that two random training examples touch a common
+        coordinate. 1.0 for every dense model; overridden by the sparse task."""
+        return 1.0
+
+    def use_holdout(self, frac: float = HOLDOUT_FRAC, seed: int = HOLDOUT_SEED) -> "BaseTask":
+        """Turn this task into its validation variant: hold out `frac` of the
+        training set (fixed by `seed`), train on the rest, and make `evaluate`
+        score the held-out part instead of the test set."""
+        raise NotImplementedError
+
+    # -- helpers ----------------------------------------------------------- #
+
+    def _evaluate(self, model: torch.nn.Module, n: int | None) -> tuple[float, float]:
+        raise NotImplementedError
+
+    def _model_with(self, params) -> torch.nn.Module:
+        if self._eval_model is None:
+            self._eval_model = self.model()
+        with torch.no_grad():
+            for dst, src in zip(self._eval_model.parameters(), params):
+                dst.copy_(src)
+        return self._eval_model
+
+    def __getstate__(self) -> dict:
+        # Workers never evaluate; do not ship the private eval model to them.
+        state = dict(self.__dict__)
+        state["_eval_model"] = None
+        return state
+
+
+def _holdout_split(n: int, frac: float, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """(held-out indices, kept indices), a fixed random split of range(n)."""
+    perm = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
+    k = int(round(frac * n))
+    return perm[:k], perm[k:]
+
+
+def _batches(n: int, seed: int, batch_size: int) -> Iterator[torch.Tensor]:
+    perm = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
+    for i in range(0, n - batch_size + 1, batch_size):
+        yield perm[i : i + batch_size]
+
+
+# --------------------------------------------------------------------------- #
+# Dense classification tasks (T2, T3a, T3b)
+# --------------------------------------------------------------------------- #
+
+
+class DenseClassification(BaseTask):
+    """x_train / x_test are float32 and already normalised; labels are int64."""
+
+    eval_batch = 2000
+
+    def __init__(self, x_train, y_train, x_test, y_test) -> None:
+        super().__init__()
+        self.x_train, self.y_train = x_train, y_train
+        self.x_test, self.y_test = x_test, y_test
+        self.n_train = x_train.shape[0]
+
+    def train_loader(self, seed: int, batch_size: int) -> Iterable:
+        for idx in _batches(self.n_train, seed, batch_size):
+            yield self.x_train[idx], self.y_train[idx]
+
+    def use_holdout(self, frac: float = HOLDOUT_FRAC, seed: int = HOLDOUT_SEED):
+        hold, keep = _holdout_split(self.n_train, frac, seed)
+        self.x_test, self.y_test = self.x_train[hold], self.y_train[hold]
+        self.x_train, self.y_train = self.x_train[keep], self.y_train[keep]
+        self.n_train = keep.numel()
+        return self
+
+    def loss(self, model, batch) -> torch.Tensor:
+        x, y = batch
+        return torch.nn.functional.cross_entropy(model(x), y)
+
+    def _evaluate(self, model, n) -> tuple[float, float]:
+        n = n or self.x_test.shape[0]
+        loss_sum, correct = 0.0, 0
+        for i in range(0, n, self.eval_batch):
+            j = min(i + self.eval_batch, n)
+            logits = model(self.x_test[i:j])
+            loss_sum += torch.nn.functional.cross_entropy(logits, self.y_test[i:j], reduction="sum").item()
+            correct += (logits.argmax(1) == self.y_test[i:j]).sum().item()
+        return loss_sum / n, correct / n
+
+
+def _load_mnist():
+    d = torch.load(_require("mnist.pt"))
+    norm = lambda x: ((x.float() / 255.0) - 0.1307) / 0.3081
+    return norm(d["x_train"]).flatten(1), d["y_train"], norm(d["x_test"]).flatten(1), d["y_test"]
+
+
+class MnistSoftmax(DenseClassification):
+    name, ref_epochs, fallback_eta = "t2", 10, 0.01
+
+    def __init__(self) -> None:
+        super().__init__(*_load_mnist())
+
+    def model(self):
+        return models.Softmax()
+
+
+class MnistMLP(DenseClassification):
+    name, ref_epochs, fallback_eta = "t3a", 10, 0.01
+
+    def __init__(self) -> None:
+        super().__init__(*_load_mnist())
+
+    def model(self):
+        return models.MLP()
+
+
+class CifarCNN(DenseClassification):
+    name, ref_epochs, fallback_eta = "t3b", 20, 0.01
+    eval_batch = 250          # larger batches thrash the cache on one thread
+    curve_eval_n = 2000       # a full 10k pass takes several seconds on one core
+    # The target here is the bottom of an overfitting curve. In the pilot,
+    # HOGWILD! at m = 4 bottomed out at 0.835 against 0.799 for serial, above
+    # the strict target of 0.803, which would leave the T3b panel of the
+    # primary figure empty. 10% slack keeps time-to-target a measurement.
+    target_slack = 0.10
+
+    def __init__(self) -> None:
+        d = torch.load(_require("cifar10.pt"))
+        mean = torch.tensor([0.4914, 0.4822, 0.4465]).view(1, 3, 1, 1)
+        std = torch.tensor([0.2470, 0.2435, 0.2616]).view(1, 3, 1, 1)
+        norm = lambda x: ((x.permute(0, 3, 1, 2).float() / 255.0) - mean) / std   # NHWC uint8 → NCHW
+        super().__init__(norm(d["x_train"]), d["y_train"], norm(d["x_test"]), d["y_test"])
+
+    def model(self):
+        return models.SmallCNN()
+
+
+# --------------------------------------------------------------------------- #
+# T1: sparse logistic regression on RCV1
+# --------------------------------------------------------------------------- #
+
+
+class Rcv1LogReg(BaseTask):
+    """CCAT vs. rest, 47,236 tf-idf features, about 76 non-zeros per document.
+
+    Split: as in the HOGWILD! paper we train on the large part (781,265 docs,
+    scikit-learn's "test" subset) and test on the small one (23,149 docs).
+
+    l2 term (Andrew's inverse-frequency scheme, with a cap). A dense
+    (l2/2)||w||^2 would make every update touch all 47k coordinates and the
+    task would stop being sparse, so the penalty is spread over the examples
+    instead: an example that contains feature j carries
+
+        (l2 / 2) * k_j * w_j^2,     k_j = min(n / count_j, L2_WEIGHT_CAP),
+
+    where count_j is the number of training documents containing j. With
+    k_j = n / count_j exactly, the mean over the training set is the full
+    (l2/2) * sum_j w_j^2 over observed features, and each gradient still
+    touches only the example's own coordinates.
+
+    Why the cap: one SGD step multiplies w_j by (1 - eta * l2 * k_j / batch).
+    Uncapped, a feature seen in a single document has k_j = 781,265, and at
+    batch size 1 that factor is far below -1 for any useful eta: the weight
+    flips sign and grows every time the feature appears. (On Andrew's branch
+    n is 23k and the batch is 32, which keeps it stable.) With the cap at
+    1000, features in at least 782 documents — 93% of all non-zeros — get the
+    full penalty and rarer ones proportionally less.
+
+    The reported test loss is the plain log-loss, without the penalty.
+    """
+
+    name, ref_epochs, fallback_eta = "t1", 5, 0.5
+    l2 = 1e-5
+    L2_WEIGHT_CAP = 1000.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        d = torch.load(_require("rcv1.pt"))
+        self.num_features: int = d["num_features"]
+        self.ptr, self.idx, self.val, self.y = d["train_ptr"], d["train_idx"], d["train_val"], d["train_y"]
+        self.n_train = self.y.shape[0]
+        self.train_rows: torch.Tensor | None = None      # None = every row; set by use_holdout
+        counts = torch.bincount(self.idx.long(), minlength=self.num_features).clamp_min(1)
+        self.l2_weight = (self.n_train / counts.float()).clamp_max(self.L2_WEIGHT_CAP)   # k_j
+        # Test set kept in COO form so evaluation is one index_add.
+        t_ptr = d["test_ptr"]
+        self.test_cols, self.test_val, self.test_y = d["test_idx"].long(), d["test_val"], d["test_y"]
+        self.test_rows = torch.repeat_interleave(torch.arange(t_ptr.shape[0] - 1), t_ptr[1:] - t_ptr[:-1])
+
+    def model(self):
+        return models.LogReg(self.num_features)
+
+    def _gather(self, rows: torch.Tensor):
+        """CSR rows → COO batch (cols, vals, row-in-batch), without a Python loop over rows."""
+        if rows.numel() == 1:
+            r = int(rows)
+            a, b = int(self.ptr[r]), int(self.ptr[r + 1])
+            return self.idx[a:b].long(), self.val[a:b], torch.zeros(b - a, dtype=torch.long)
+        starts = self.ptr[rows]
+        counts = self.ptr[rows + 1] - starts
+        local = torch.repeat_interleave(torch.arange(rows.numel()), counts)
+        first = torch.cumsum(counts, 0) - counts                      # offset of each row in the batch
+        pos = torch.arange(int(counts.sum())) - first[local] + starts[local]
+        return self.idx[pos].long(), self.val[pos], local
+
+    def train_loader(self, seed: int, batch_size: int) -> Iterable:
+        for rows in _batches(self.n_train, seed, batch_size):
+            if self.train_rows is not None:
+                rows = self.train_rows[rows]
+            cols, vals, local = self._gather(rows)
+            yield cols, vals, local, self.y[rows]
+
+    def use_holdout(self, frac: float = HOLDOUT_FRAC, seed: int = HOLDOUT_SEED):
+        hold, keep = _holdout_split(self.n_train, frac, seed)
+        self.test_cols, self.test_val, self.test_rows = self._gather(hold)
+        self.test_y = self.y[hold]
+        self.train_rows, self.n_train = keep, keep.numel()
+        return self
+
+    def loss(self, model, batch) -> torch.Tensor:
+        cols, vals, local, y = batch
+        z = model(cols, vals, local, y.shape[0])
+        fit = torch.nn.functional.binary_cross_entropy_with_logits(z, y)
+        return fit + 0.5 * self.l2 * (self.l2_weight[cols] * model.weight[cols] ** 2).sum() / y.shape[0]
+
+    def grads(self, model, batch) -> list[torch.Tensor]:
+        """Closed-form gradient of `loss`, returned as a sparse COO vector so the
+        update writes only the touched coordinates. Checked against autograd in
+        the test suite. (Autograd on this model costs ~10x more per step.)"""
+        cols, vals, local, y = batch
+        n = y.shape[0]
+        w = model.weight.detach()[cols]                 # read: only the touched coordinates
+        z = torch.zeros(n).index_add_(0, local, w * vals)
+        resid = (torch.sigmoid(z) - y) / n
+        g = resid[local] * vals + (self.l2 / n) * self.l2_weight[cols] * w
+        return [torch.sparse_coo_tensor(cols.unsqueeze(0), g, (self.num_features,), check_invariants=False)]
+
+    def _evaluate(self, model, n) -> tuple[float, float]:
+        n = self.test_y.shape[0]            # always the full test set: one sparse product
+        z = model(self.test_cols, self.test_val, self.test_rows, n)
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(z, self.test_y).item()
+        acc = ((z > 0).float() == self.test_y).float().mean().item()
+        return loss, acc
+
+    def conflict_frac(self, pairs: int = 20000, seed: int = 0) -> float:
+        g = torch.Generator().manual_seed(seed)
+        a = torch.randint(self.n_train, (pairs,), generator=g)
+        b = torch.randint(self.n_train, (pairs,), generator=g)
+        hits = 0
+        for i, j in zip(a.tolist(), b.tolist()):
+            si = self.idx[int(self.ptr[i]) : int(self.ptr[i + 1])]
+            sj = self.idx[int(self.ptr[j]) : int(self.ptr[j + 1])]
+            hits += bool(torch.isin(si, sj).any())
+        return hits / pairs
+
+
+# --------------------------------------------------------------------------- #
+# Synthetic stand-in (smoke tests)
+# --------------------------------------------------------------------------- #
+
+
+class StubTask(DenseClassification):
+    """Small synthetic 4-class problem. Needs no downloads and trains in well
+    under a second; exists so every mode can be tested without real data."""
+
+    name, ref_epochs, fallback_eta = "stub", 2, 0.05
+
+    def __init__(self, n: int = 4096, d: int = 32, classes: int = 4) -> None:
+        g = torch.Generator().manual_seed(0)       # same data in every process
+        w = torch.randn(d, classes, generator=g)
+        x = torch.randn(n + n // 4, d, generator=g)
+        y = (x @ w + 0.5 * torch.randn(n + n // 4, classes, generator=g)).argmax(1)
+        self._d, self._classes = d, classes
+        super().__init__(x[:n], y[:n], x[n:], y[n:])
+        if self.target_loss != self.target_loss:   # NaN: no reference entry for the stub
+            self.target_loss = 0.5
+
+    def model(self):
+        return models.Softmax(self._d, self._classes)
+
+
+# --------------------------------------------------------------------------- #
+# Registry
+# --------------------------------------------------------------------------- #
+
+TASKS = {"t1": Rcv1LogReg, "t2": MnistSoftmax, "t3a": MnistMLP, "t3b": CifarCNN, "stub": StubTask}
+
+
+def get_task(name: str) -> BaseTask:
+    """`name` is a key of TASKS, optionally followed by "@val" for the validation variant."""
+    base, _, variant = name.partition("@")
+    if base not in TASKS or variant not in ("", "val"):
+        raise ValueError(f"unknown task {name!r}; expected one of {sorted(TASKS)}, optionally with '@val'")
+    task = TASKS[base]()
+    return task.use_holdout() if variant == "val" else task
+
+
+# --------------------------------------------------------------------------- #
+# Download + conversion
+# --------------------------------------------------------------------------- #
+
+
+def _require(filename: str) -> Path:
+    path = DATA_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"{path} is missing — run `python -m hogwild.tasks download` first")
+    return path
+
+
+def download(which: list[str] | None = None) -> None:
+    """Fetch the raw datasets and convert each into one compact tensor file.
+
+    data/mnist.pt, data/cifar10.pt   uint8 images + int64 labels (via torchvision)
+    data/rcv1.pt                     CSR arrays, float32 values, int32 column ids (via scikit-learn)
+    """
+    which = which or ["mnist", "cifar10", "rcv1"]
+    DATA_DIR.mkdir(exist_ok=True)
+    raw = DATA_DIR / "raw"
+
+    if "mnist" in which and not (DATA_DIR / "mnist.pt").exists():
+        from torchvision.datasets import MNIST
+
+        tr, te = MNIST(raw, train=True, download=True), MNIST(raw, train=False, download=True)
+        torch.save({"x_train": tr.data, "y_train": tr.targets, "x_test": te.data, "y_test": te.targets},
+                   DATA_DIR / "mnist.pt")
+        print("wrote data/mnist.pt", tuple(tr.data.shape), tuple(te.data.shape))
+
+    if "cifar10" in which and not (DATA_DIR / "cifar10.pt").exists():
+        from torchvision.datasets import CIFAR10
+
+        tr, te = CIFAR10(raw, train=True, download=True), CIFAR10(raw, train=False, download=True)
+        torch.save({"x_train": torch.from_numpy(tr.data), "y_train": torch.tensor(tr.targets),
+                    "x_test": torch.from_numpy(te.data), "y_test": torch.tensor(te.targets)},
+                   DATA_DIR / "cifar10.pt")
+        print("wrote data/cifar10.pt", tr.data.shape, te.data.shape)
+
+    if "rcv1" in which and not (DATA_DIR / "rcv1.pt").exists():
         from sklearn.datasets import fetch_rcv1
 
-        return fetch_rcv1(
-            data_home=str(self.data_root), subset=subset, download_if_missing=download
-        )
-
-    def download(self) -> None:
-        self._fetch("train", download=True)
-
-    def _load(self, subset: str):
-        data = self._fetch(subset)
-        category = list(data.target_names).index("CCAT")
-        labels = torch.from_numpy(data.target[:, category:category + 1].toarray().ravel()).float()
-        features = data.data.astype("float32")
-        features.sum_duplicates()
-        features.eliminate_zeros()
-        return features, labels
-
-    @cached_property
-    def _train(self):
-        return self._load("train")
-
-    @cached_property
-    def _test(self):
-        return self._load("test")
-
-    @property
-    def train_size(self) -> int:
-        return len(self._train[1])
-
-    @cached_property
-    def _inverse_frequency(self) -> torch.Tensor:
-        x, _ = self._train
-        counts = torch.bincount(
-            torch.from_numpy(x.indices.astype("int64")), minlength=x.shape[1]
-        )
-        return self.train_size / counts.clamp_min(1).float()
-
-    def model(self) -> LogReg:
-        return LogReg()
-
-    def _batches(self, train: bool, batch_size: int, order=None):
-        features, labels = self._train if train else self._test
-        if order is None:
-            order = torch.arange(len(labels))
-        for indices in order.split(batch_size):
-            batch = features[indices.numpy()].tocoo()
-            coordinates = torch.stack(
-                (torch.from_numpy(batch.row), torch.from_numpy(batch.col))
-            )
-            x = torch.sparse_coo_tensor(
-                coordinates, torch.from_numpy(batch.data), batch.shape,
-                is_coalesced=True, check_invariants=False,
-            )
-            yield x, labels[indices]
-
-    def loss(self, model: LogReg, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        data_loss = F.binary_cross_entropy_with_logits(model(x), y)
-        columns = x.indices()[1]
-        weights = F.embedding(columns, model.weight, sparse=True).squeeze(1)
-        # Allocate each coordinate's L2 penalty across the rows containing it.
-        # The training-set mean recovers full L2 on observed coordinates.
-        penalty = (weights.square() * self._inverse_frequency[columns]).sum()
-        return data_loss + (0.5 * self.l2 / len(y)) * penalty
-
-    def _test_objective(self, model, x, y) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = model(x)
-        return F.binary_cross_entropy_with_logits(logits, y, reduction="sum"), logits >= 0
-
-    def _test_penalty(self, model: LogReg) -> float:
-        return 0.5 * self.l2 * model.weight.square().sum().item()
+        out = {}
+        # Swapped on purpose (see Rcv1LogReg): scikit-learn's big "test" subset is our training set.
+        for ours, theirs in (("train", "test"), ("test", "train")):
+            bunch = fetch_rcv1(data_home=str(raw), subset=theirs)
+            ccat = list(bunch.target_names).index("CCAT")
+            x = bunch.data.tocsr()
+            x.sort_indices()
+            out[f"{ours}_ptr"] = torch.from_numpy(x.indptr.astype("int64"))
+            out[f"{ours}_idx"] = torch.from_numpy(x.indices.astype("int32"))
+            out[f"{ours}_val"] = torch.from_numpy(x.data.astype("float32"))
+            out[f"{ours}_y"] = torch.from_numpy(bunch.target[:, ccat].toarray().ravel().astype("float32"))
+            out["num_features"] = x.shape[1]
+            print(f"rcv1 {ours}: {x.shape[0]} docs, {x.nnz} non-zeros")
+        torch.save(out, DATA_DIR / "rcv1.pt")
+        print("wrote data/rcv1.pt")
 
 
-class VisionTask(ClassificationTask):
-    eval_batch_size = 512
-
-    def _dataset(self, train: bool, download: bool = False):
-        from torchvision import datasets
-
-        dataset_type = getattr(datasets, self.dataset_name)
-        return dataset_type(root=self.data_root, train=train, download=download)
-
-    def download(self) -> None:
-        for train in (True, False):
-            self._dataset(train, download=True)
-
-    def _load(self, train: bool):
-        dataset = self._dataset(train)
-        images = torch.as_tensor(dataset.data)
-        if self.dataset_name == "MNIST":
-            images = images.unsqueeze(1)
-        else:
-            # Store the CIFAR image axes contiguously so indexing keeps RGB together.
-            images = images.contiguous()
-        return images, torch.as_tensor(dataset.targets)
-
-    @cached_property
-    def _train(self):
-        return self._load(train=True)
-
-    @cached_property
-    def _test(self):
-        return self._load(train=False)
-
-    @property
-    def train_size(self) -> int:
-        return len(self._train[1])
-
-    def _batches(self, train: bool, batch_size: int, order=None):
-        images, labels = self._train if train else self._test
-        if order is None:
-            order = torch.arange(len(labels))
-        mean = torch.tensor(self.mean).view(1, -1, 1, 1)
-        std = torch.tensor(self.std).view(1, -1, 1, 1)
-        for indices in order.split(batch_size):
-            x = images[indices]
-            if self.dataset_name == "CIFAR10":
-                x = x.permute(0, 3, 1, 2)
-            x = x.float().div_(255).sub_(mean).div_(std)
-            yield x, labels[indices]
-
-
-class MNISTSoftmaxTask(VisionTask):
-    name = "t2"
-    dataset_name = "MNIST"
-    mean = (0.1307,)
-    std = (0.3081,)
-    default_eta = 0.025
-    target_loss = 0.2796574394226074
-
-    def model(self) -> Softmax:
-        return Softmax()
-
-
-class MNISTMLPTask(MNISTSoftmaxTask):
-    name = "t3a"
-    default_eta = 0.1
-    target_loss = 0.06365422883033753
-
-    def model(self) -> MLP:
-        return MLP()
-
-
-class CIFAR10Task(VisionTask):
-    name = "t3b"
-    dataset_name = "CIFAR10"
-    mean = (0.4914, 0.4822, 0.4465)
-    std = (0.2470, 0.2435, 0.2616)
-    default_eta = 0.1
-    target_loss = 1.3762148345947265
-
-    def model(self) -> SmallCNN:
-        return SmallCNN().to(memory_format=torch.channels_last)
-
-
-_TASKS = {
-    "t1_rcv1_logreg": RCV1Task,
-    "t2_mnist_softmax": MNISTSoftmaxTask,
-    "t3a_mnist_mlp": MNISTMLPTask,
-    "t3b_cifar_cnn": CIFAR10Task,
-}
-
-
-def get_task(name: str, data_root: str | Path = DATA_ROOT) -> Task:
-    """Resolve a short task ID or config stem without reading dataset files."""
-    for stem, task_type in _TASKS.items():
-        if name in (stem, task_type.name):
-            return task_type(data_root)
-    if name == "stub":
-        from hogwild.stub_task import StubTask
-
-        return StubTask()
-    raise ValueError(f"Unknown task {name!r}. Expected t1, t2, t3a, t3b, or stub.")
-
-
-def training_loss(
-    task: Task, model: nn.Module, x: torch.Tensor, y: torch.Tensor
-) -> torch.Tensor:
-    """Use task-specific objectives while supporting the original Task protocol."""
-    loss = getattr(task, "loss", None)
-    if loss is not None:
-        return loss(model, x, y)
-    if y.is_floating_point():
-        return F.mse_loss(model(x), y)
-    return F.cross_entropy(model(x), y)
-
-
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["download"])
-    parser.add_argument(
-        "datasets", nargs="*", metavar="DATASET",
-        help="rcv1, mnist, or cifar10 (default: all)",
-    )
-    parser.add_argument("--data-root", type=Path, default=DATA_ROOT)
-    args = parser.parse_args(argv)
-    datasets = {"rcv1": RCV1Task, "mnist": MNISTSoftmaxTask, "cifar10": CIFAR10Task}
-    for name in args.datasets or datasets:
-        if name not in datasets:
-            parser.error(f"unknown dataset {name!r}")
-        print(f"Downloading {name} to {args.data_root}", flush=True)
-        datasets[name](args.data_root).download()
+def info() -> None:
+    for name in TASKS:
+        try:
+            task = get_task(name)
+        except FileNotFoundError as e:
+            print(f"{name:5s} not downloaded ({e})")
+            continue
+        n_params = sum(p.numel() for p in task.model().parameters())
+        print(f"{name:5s} n_train={task.n_train:7d} params={n_params:7d} ref_epochs={task.ref_epochs:2d} "
+              f"default_eta={task.default_eta:g} target_loss={task.target_loss:.4f}")
 
 
 if __name__ == "__main__":
-    main()
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "download":
+        download(sys.argv[2:] or None)
+    elif cmd == "info":
+        info()
+    else:
+        sys.exit("usage: python -m hogwild.tasks {download [mnist cifar10 rcv1] | info}")

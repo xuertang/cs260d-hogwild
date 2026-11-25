@@ -1,18 +1,20 @@
 """Shared contracts (README §6). Fixed as of Nov 22.
 
-Change anything in this file only via a PR that all four of us review: every
-stream codes against these names.
+Change anything in this file only via a PR that all four of us review:
+everything else in the repo is written against these names.
 
-Unlike the rest of the scaffolding, this file is real code rather than a stub,
-because the contracts are already fully specified in the README. The only
-additions beyond the README are the (de)serialisation helpers at the bottom of
-each dataclass, which exist so that sweep.py, runner.py and analysis/ all read
-and write rows the same way.
+Beyond the README, this file adds only the (de)serialisation helpers, so that
+sweep.py, runner.py and analysis/ all read and write rows the same way.
 
-Open questions to settle at the next sync (marked OPEN below):
-  1. What exactly is `params` in Task.evaluate(params)?
-  2. What is the `Logger` type in Mode.run(task, cfg, log)?
-  3. Is Config.task the short ID ("t2") or the config stem ("t2_mnist_softmax")?
+Decisions taken on the points the README leaves open:
+  1. `params` in Task.evaluate(params) is a sequence of tensors in
+     `model().parameters()` order.
+  2. `Logger` is hogwild.instrument.Logger.
+  3. Config.task is the short ID: "t1", "t2", "t3a", "t3b" (or "stub").
+  4. Tasks also provide grads(model, batch) and share_memory(); see tasks.py.
+  5. Curve points are (x, test_loss), x = epochs or seconds since start.
+  6. A run that never reaches the target has time_to_target_s =
+     epochs_to_target = inf (written to JSON as Infinity).
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ STRAGGLERS = ("none", "mild", "heavy")
 # default one. Keyword-only keeps the README's field order legal.
 @dataclass(kw_only=True)
 class Config:
-    task: str                 # OPEN (3): registry key understood by tasks.py
+    task: str                 # "t1" | "t2" | "t3a" | "t3b" | "stub"
     mode: str                 # one of MODES
     m: int                    # workers whose gradients count (1 for serial)
     b: int = 0                # extra backup workers; only meaningful for mode="backup"
@@ -67,11 +69,22 @@ class Config:
             raise ValueError(f"eta_scale={self.eta_scale!r}, expected one of {ETA_SCALES}")
         if self.straggler not in STRAGGLERS:
             raise ValueError(f"straggler={self.straggler!r}, expected one of {STRAGGLERS}")
-        # TODO(all): decide whether to also reject b > 0 outside mode="backup"
-        #            and tau_inject > 0 outside mode="hogwild", or just ignore them.
+        # b outside mode="backup" and tau_inject outside mode="hogwild" are ignored.
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Config":
+        """Two conveniences on top of the plain fields, so that the tuned step
+        size lives in one place (configs/reference.yaml):
+          - eta missing or null → the task's default_eta;
+          - eta_mult (not a Config field) multiplies eta — used by the E4 sweep.
+        """
+        d = dict(d)
+        mult = float(d.pop("eta_mult", 1.0))
+        if d.get("eta") is None:
+            from hogwild.tasks import TASKS, load_reference   # lazy: needs torch
+
+            d["eta"] = load_reference().get(d["task"], {}).get("default_eta", TASKS[d["task"]].fallback_eta)
+        d["eta"] = float(d["eta"]) * mult
         return cls(**d)
 
     @classmethod
@@ -98,9 +111,7 @@ class ResultRow:
     run_id: str
     config: Config
 
-    # Headline metrics. TODO(all): agree on the "never reached target" sentinel.
-    # Proposal: float("inf"), which Python's json writes as Infinity and pandas
-    # reads back fine; analysis then filters on math.isinf.
+    # Headline metrics. inf = the target was never reached.
     time_to_target_s: float
     epochs_to_target: float
     final_test_acc: float
@@ -109,14 +120,11 @@ class ResultRow:
     tau_hist: dict[int, int]          # tau value → number of updates with that tau
     interference_mean: float          # mean cosine between concurrent in-flight gradients
 
-    # Curves from the evaluator. OPEN: README fixes the element type as a
-    # 2-tuple but not its meaning. Proposal: (x, test_loss), with x = epochs for
-    # curve_epoch and x = seconds since start for curve_wall. If analysis also
-    # wants test_acc per point, that is a schema change → PR.
+    # Curves from the evaluator: (epochs, test_loss) and (seconds, test_loss).
     curve_epoch: list[tuple[float, float]] = field(default_factory=list)
     curve_wall: list[tuple[float, float]] = field(default_factory=list)
 
-    param_dist_to_seed0: float = float("nan")  # reproducibility; filled in by analysis or sweep
+    param_dist_to_seed0: float = float("nan")  # reproducibility; needs --params-dir
     wall_total_s: float = 0.0
 
     def to_json(self) -> str:
@@ -155,7 +163,7 @@ def read_rows(path: str | Path) -> list[ResultRow]:
 
 @runtime_checkable
 class Task(Protocol):
-    """Implemented in tasks.py (stream B). hogwild/stub_task.py is a stand-in."""
+    """Implemented in tasks.py."""
 
     name: str
     target_loss: float   # fixed from the serial run, so time-to-target is comparable
@@ -166,26 +174,17 @@ class Task(Protocol):
         ...
 
     def train_loader(self, seed: int, batch_size: int) -> Iterable:
-        """One epoch of (x, y) batches, shuffled deterministically by `seed`.
-
-        OPEN: does each worker get its own loader over the full dataset (classic
-        HOGWILD!, sampling with replacement across workers), or a disjoint shard?
-        This changes what "one epoch" means for m > 1 — settle between A and B.
-        """
+        """One pass over the training set in an order fixed by `seed`.
+        Each worker calls this with its own seed and walks the full dataset."""
         ...
 
     def evaluate(self, params) -> tuple[float, float]:
-        """Return (test_loss, test_acc).
-
-        OPEN (1): type of `params`. Proposal: a sequence of tensors in
-        `self.model().parameters()` order — that is what the shared-memory
-        runner naturally holds, and it avoids pickling a state_dict every 2 s.
-        """
+        """(test_loss, test_acc) for `params`: tensors in model().parameters() order."""
         ...
 
 
 class Mode(Protocol):
-    """Implemented in modes/*.py: serial (B), sync + backup (C), hogwild (A)."""
+    """Implemented in modes/*.py."""
 
     def run(self, task: Task, cfg: Config, log: "Logger") -> ResultRow:
         """Train `task` under `cfg`, return the finished row. Must not write files itself:

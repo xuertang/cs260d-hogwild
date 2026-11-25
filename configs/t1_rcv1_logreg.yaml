@@ -1,7 +1,19 @@
+# T1 — RCV1 binary (CCAT vs. rest), l2-logistic regression, 47k params, sparse.
+#
+# Base config: the serial reference run. Sweeps and CLI flags override
+# mode / m / b / seed / tau_inject / straggler on top of this file.
+#
+# eta is left null on purpose: it resolves to the task's tuned default_eta in
+# configs/reference.yaml (written by `python -m hogwild.tune --task t1 ...`).
+#
+# max_epochs is 1.5x the reference length (5 epochs). The target loss is
+# the serial loss at 5 epochs, so a run needs headroom to reach it when
+# it is less efficient per epoch than serial.
+
 task: t1
 mode: serial
 m: 1
-eta: 1.0
+eta: null
 seed: 0
-batch_size: 32
-max_epochs: 5
+batch_size: 1
+max_epochs: 8

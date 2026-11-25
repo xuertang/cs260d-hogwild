@@ -1,9 +1,9 @@
 """Training modes. Each module exposes one class implementing schema.Mode.
 
-    serial   → modes/serial.py   stream B  (not yet created)
-    sync     → modes/sync.py     stream C
-    backup   → modes/backup.py   stream C
-    hogwild  → modes/hogwild.py  stream A
+    serial   → modes/serial.py    one worker; the reference curve
+    sync     → modes/sync.py      m workers, barrier, averaged gradient
+    backup   → modes/backup.py    m + b workers, first m gradients win
+    hogwild  → modes/hogwild.py   m workers, lock-free in-place updates
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from importlib import import_module
 
 from hogwild.schema import Mode
 
-# mode name → (module, class). Imported lazily so that one missing or broken
-# mode does not stop the others from running while streams land separately.
+# mode name → (module, class). Imported lazily: runner.py imports this package
+# and the mode modules import runner.py.
 _REGISTRY: dict[str, tuple[str, str]] = {
     "serial": ("hogwild.modes.serial", "SerialMode"),
     "sync": ("hogwild.modes.sync", "SyncMode"),
