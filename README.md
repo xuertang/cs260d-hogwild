@@ -93,12 +93,12 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 
 ### Modes
 
-| Mode              | Workers | Barrier | Staleness    | Notes                                                                  |
-| ----------------- | ------- | ------- | ------------ | ---------------------------------------------------------------------- |
-| `serial`          | 1       | —       | 0            | reference curve, η tuned here                                          |
-| `sync`            | m       | yes     | 0            | gradients averaged, same total batch as `hogwild`                      |
-| `backup`          | m + b   | yes     | 0            | first m gradients averaged, rest dropped (Chen et al. 2016)            |
-| `hogwild`         | m       | no      | measured     | lock-free in-place add on `share_memory_()` tensors                    |
+| Mode              | Workers | Barrier | Staleness    | Notes                                                                   |
+| ----------------- | ------- | ------- | ------------ | ----------------------------------------------------------------------- |
+| `serial`          | 1       | —       | 0            | reference curve, η tuned here                                           |
+| `sync`            | m       | yes     | 0            | gradients averaged, same total batch as `hogwild`                       |
+| `backup`          | m + b   | yes     | 0            | first m gradients averaged, rest dropped (Chen et al. 2016)             |
+| `hogwild`         | m       | no      | measured     | lock-free in-place add on `share_memory_()` tensors                     |
 | `hogwild --tau K` | m       | no      | ≈ K injected | each worker applies the gradient it computed ⌈K/m⌉ of its own steps ago |
 
 ### Instrumentation (`hogwild/instrument.py`)
@@ -184,8 +184,6 @@ class ResultRow:                  # one JSON line in results/*.jsonl
 
 ## 7. Plan — Nov 22 → Dec 3
 
-The midterm is behind us, so the original pilot window is gone; this is the compressed schedule. Thanksgiving is Nov 26.
-
 | Date           | Milestone                                                                                                           | Owner(s)        |
 | -------------- | ------------------------------------------------------------------------------------------------------------------- | --------------- |
 | **Sun Nov 22** | Repo up, `schema.py` + this README merged, roles confirmed                                                          | all             |
@@ -201,41 +199,39 @@ The midterm is behind us, so the original pilot window is gone; this is the comp
 | Wed Dec 2      | Record presentation; report final pass + contribution statement                                                     | all             |
 | **Thu Dec 3**  | **Upload recording + report to Bruinlearn**                                                                         | Richard         |
 
-Daily: 15-min sync at 9 pm PT on Discord. Blockers go in the channel immediately, not at the sync.
-
 ### Status — Nov 24
 
-| Milestone | State |
-| --- | --- |
-| `serial` + T1/T2 loaders end to end; runner | Done. All four tasks, all four modes, tests in `tests/`. |
-| **Pilot gate** (hogwild on T1, T2 at m = 4 with τ logged; serial curves + tuned η for all tasks) | **Passed on a laptop** — numbers below. Tuned values in `configs/reference.yaml`. |
-| `sync` + `backup` pass the smoke test | Done (smoke on T1, T2, T3a; full runs on T2). |
-| Sweep driver runs E1 for T1 | Driver works with resume. For T1 it ran serial and hogwild only; T1 sync/backup were smoke-tested, not run to completion. |
-| VM provisioned; E1–E4 on the VM | **Not done.** Needs someone's cloud account. One command once it exists: `bash scripts/run_all.sh`. |
-| Plots, bound check | Code done; exercised on synthetic rows and on the pilot rows (`report/figures/pilot/`). |
-| Report | Skeleton with figure placeholders compiles; §3 and Appendix A have draft text. No results text. |
-| Slides, recording, upload | Not started. |
+| Milestone                                                                                        | State                                                                                                                     |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `serial` + T1/T2 loaders end to end; runner                                                      | Done. All four tasks, all four modes, tests in `tests/`.                                                                  |
+| **Pilot gate** (hogwild on T1, T2 at m = 4 with τ logged; serial curves + tuned η for all tasks) | **Passed on a laptop** — numbers below. Tuned values in `configs/reference.yaml`.                                         |
+| `sync` + `backup` pass the smoke test                                                            | Done (smoke on T1, T2, T3a; full runs on T2).                                                                             |
+| Sweep driver runs E1 for T1                                                                      | Driver works with resume. For T1 it ran serial and hogwild only; T1 sync/backup were smoke-tested, not run to completion. |
+| VM provisioned; E1–E4 on the VM                                                                  | **Not done.** Needs someone's cloud account. One command once it exists: `bash scripts/run_all.sh`.                       |
+| Plots, bound check                                                                               | Code done; exercised on synthetic rows and on the pilot rows (`report/figures/pilot/`).                                   |
+| Report                                                                                           | Skeleton with figure placeholders compiles; §3 and Appendix A have draft text. No results text.                           |
+| Slides, recording, upload                                                                        | Not started.                                                                                                              |
 
 Pilot, seed 0 only, Apple-silicon laptop with 6 performance cores (so m ≤ 4; these are development numbers, not report numbers). Rows are in `results/pilot/e1.jsonl`.
 
-| Task | Mode | m | Updates/s | Time to target (s) | Epochs to target | Speed-up | Final acc | Mean τ | Gradient cosine |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| T1 | serial | 1 | 21,131 | 129.9 | 3.50 | 1.00× | 0.9457 | 0.00 | — |
-| T1 | hogwild | 2 | 41,240 | 75.0 | 3.98 | 1.73× | 0.9457 | 0.60 | 0.0009 |
-| T1 | hogwild | 4 | 80,509 | 36.5 | 3.76 | 3.56× | 0.9446 | 1.81 | 0.0006 |
-| T2 | serial | 1 | 13,922 | 32.1 | 7.25 | 1.00× | 0.9228 | 0.00 | — |
-| T2 | hogwild | 2 | 26,668 | 15.8 | 7.67 | 2.03× | 0.9237 | 0.73 | 0.0202 |
-| T2 | hogwild | 4 | 53,441 | 10.1 | 8.89 | 3.16× | 0.9218 | 2.20 | 0.0128 |
-| T2 | sync | 2 | 8,168 | 43.9 | 11.97 | 0.73× | 0.9218 | 0.00 | 0.0107 |
-| T2 | sync | 4 | 4,989 | never | never | — | 0.9202 | 0.00 | 0.0119 |
-| T2 | backup (b=1) | 2 | 7,242 | 44.8 | 10.70 | 0.72× | 0.9226 | 0.00 | 0.0098 |
-| T2 | backup (b=1) | 4 | 4,355 | never | never | — | 0.9201 | 0.00 | 0.0235 |
-| T3a | serial | 1 | 5,958 | 62.9 | 6.24 | 1.00× | 0.9838 | 0.00 | — |
-| T3a | hogwild | 2 | 10,287 | 38.8 | 6.62 | 1.62× | 0.9831 | 0.74 | 0.0085 |
-| T3a | hogwild | 4 | 19,104 | 24.1 | 7.68 | 2.61× | 0.9821 | 2.26 | 0.0098 |
-| T3b | serial | 1 | 312 | 98.9 | 4.93 | 1.00× | 0.7330 | 0.00 | — |
-| T3b | hogwild | 2 | 597 | 49.8 | 4.74 | 1.99× | 0.7261 | 0.95 | 0.0178 |
-| T3b | hogwild | 4 | 1,122 | 32.5 | 5.87 | 3.04× | 0.7217 | 2.88 | 0.0274 |
+| Task | Mode         | m   | Updates/s | Time to target (s) | Epochs to target | Speed-up | Final acc | Mean τ | Gradient cosine |
+| ---- | ------------ | --- | --------- | ------------------ | ---------------- | -------- | --------- | ------ | --------------- |
+| T1   | serial       | 1   | 21,131    | 129.9              | 3.50             | 1.00×    | 0.9457    | 0.00   | —               |
+| T1   | hogwild      | 2   | 41,240    | 75.0               | 3.98             | 1.73×    | 0.9457    | 0.60   | 0.0009          |
+| T1   | hogwild      | 4   | 80,509    | 36.5               | 3.76             | 3.56×    | 0.9446    | 1.81   | 0.0006          |
+| T2   | serial       | 1   | 13,922    | 32.1               | 7.25             | 1.00×    | 0.9228    | 0.00   | —               |
+| T2   | hogwild      | 2   | 26,668    | 15.8               | 7.67             | 2.03×    | 0.9237    | 0.73   | 0.0202          |
+| T2   | hogwild      | 4   | 53,441    | 10.1               | 8.89             | 3.16×    | 0.9218    | 2.20   | 0.0128          |
+| T2   | sync         | 2   | 8,168     | 43.9               | 11.97            | 0.73×    | 0.9218    | 0.00   | 0.0107          |
+| T2   | sync         | 4   | 4,989     | never              | never            | —        | 0.9202    | 0.00   | 0.0119          |
+| T2   | backup (b=1) | 2   | 7,242     | 44.8               | 10.70            | 0.72×    | 0.9226    | 0.00   | 0.0098          |
+| T2   | backup (b=1) | 4   | 4,355     | never              | never            | —        | 0.9201    | 0.00   | 0.0235          |
+| T3a  | serial       | 1   | 5,958     | 62.9               | 6.24             | 1.00×    | 0.9838    | 0.00   | —               |
+| T3a  | hogwild      | 2   | 10,287    | 38.8               | 6.62             | 1.62×    | 0.9831    | 0.74   | 0.0085          |
+| T3a  | hogwild      | 4   | 19,104    | 24.1               | 7.68             | 2.61×    | 0.9821    | 2.26   | 0.0098          |
+| T3b  | serial       | 1   | 312       | 98.9               | 4.93             | 1.00×    | 0.7330    | 0.00   | —               |
+| T3b  | hogwild      | 2   | 597       | 49.8               | 4.74             | 1.99×    | 0.7261    | 0.95   | 0.0178          |
+| T3b  | hogwild      | 4   | 1,122     | 32.5               | 5.87             | 3.04×    | 0.7217    | 2.88   | 0.0274          |
 
 Merged from Andrew's branch (`origin/Andrew`), on top of the code above:
 
