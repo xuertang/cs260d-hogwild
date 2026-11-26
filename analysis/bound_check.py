@@ -274,6 +274,7 @@ def fig_bound_check(df: pd.DataFrame) -> Path:
             pending += [(float(x), label) for x in g.loc[g["n_reached"] == 0, "tau_mean"]]
 
         plots._log_scales(ax, x_base=10)  # after the error bars, see plots._log_scales
+        plots._plain_log_labels(ax, "x")  # T2 spans under two decades: default labels overlap
         # x range: the data, widened to include n / Delta when that is nearby.
         thr = predicted_threshold(task, df)
         lo, hi = float(sub["tau_mean"].min()) / 1.6, float(sub["tau_mean"].max()) * 1.6

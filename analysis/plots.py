@@ -570,13 +570,15 @@ def _plain_ticks(ax, axis: str, values: Sequence[float], labels: Sequence[str] |
     target.set_minor_locator(NullLocator())
 
 
-def _plain_log_y(ax) -> None:
-    """Log y axis labelled with plain numbers ("20", not "2 x 10^1"); minor ticks
-    (2, 5, ...) are labelled only when the axis spans about a decade and a half or less."""
-    ax.set_yscale("log")
+def _plain_log_labels(ax, axis: str) -> None:
+    """Label an (already) log axis with plain numbers ("20", not "2 x 10^1"); minor
+    ticks (2, 5, ...) are labelled only when the axis spans about a decade and a half
+    or less. Without this matplotlib labels EVERY minor tick, as "3 x 10^-1", whenever
+    fewer than two decade ticks are in view, and the labels overlap in a narrow panel."""
+    target, limits = (ax.xaxis, ax.get_xlim) if axis == "x" else (ax.yaxis, ax.get_ylim)
 
     def minor(v: float, _pos) -> str:
-        lo, hi = ax.get_ylim()
+        lo, hi = limits()
         if v <= 0 or lo <= 0 or hi <= 0:
             return ""
         decades = abs(math.log10(hi / lo))
@@ -584,8 +586,14 @@ def _plain_log_y(ax) -> None:
         keep = range(2, 10) if decades < 0.4 else (2, 3, 5) if decades < 0.8 else (2, 5) if decades < 1.6 else ()
         return f"{v:g}" if mantissa in keep else ""
 
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
-    ax.yaxis.set_minor_formatter(FuncFormatter(minor))
+    target.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
+    target.set_minor_formatter(FuncFormatter(minor))
+
+
+def _plain_log_y(ax) -> None:
+    """Log y axis with plain-number labels; see _plain_log_labels."""
+    ax.set_yscale("log")
+    _plain_log_labels(ax, "y")
 
 
 def _log_scales(ax, *, x_base: float | None = None, y: bool = False) -> None:
@@ -794,7 +802,7 @@ def _e1_figure(df: pd.DataFrame, ycol: str, ylabel: str, name: str, *, log_y: bo
 def fig_e1_time_to_target(df: pd.DataFrame) -> Path:
     """PRIMARY FIGURE. Time-to-target vs. cores, one line per mode, one panel per task.
 
-    4 panels (T1, T2, T3a, T3b) left to right = rising density then
+    One panel per task (T1, T2, T3b) left to right = rising density then
     non-convexity, so H1 reads straight off the figure. Log-log axes with an
     ideal 1/m reference line (mean serial time / m); error bars = std over
     seeds. Backup rows sit at their m (the m + b processes are not on the axis).

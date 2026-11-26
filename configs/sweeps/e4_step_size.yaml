@@ -3,7 +3,7 @@
 #
 # sync and hogwild at m = 8, eta at 0.5x and 2x the step each mode uses in E1.
 # The 1x point is not repeated here: it is the m = 8 column of E1.
-#   4 tasks x 2 modes x 2 eta x 3 seeds = 48
+#   3 tasks x 2 modes x 2 eta x 3 seeds = 36
 #
 # E1's step is the serial-tuned eta for hogwild and m = 8 times that for sync
 # (see the header of e1_scaling.yaml), so sync's 0.5x / 2x are eta_mult 4 / 16.
@@ -12,13 +12,12 @@
 
 name: e4_step_size
 seeds: [0, 1, 2]
-expected_runs: 48
+expected_runs: 36
 
 grids:
   - base: &all_tasks
       - configs/t1_rcv1_logreg.yaml
       - configs/t2_mnist_softmax.yaml
-      - configs/t3a_mnist_mlp.yaml
       - configs/t3b_cifar_cnn.yaml
     mode: [hogwild]
     m: [8]

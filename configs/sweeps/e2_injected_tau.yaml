@@ -1,9 +1,10 @@
 # E2 — injected staleness (tests H2). README §5.
 # Format: see the header of e1_scaling.yaml.
 #
-# hogwild at m = 8 on the two non-convex tasks, tau in {8, 32, 128}, each at
+# hogwild at m = 8 on the non-convex task (T3b), tau in {8, 32, 128}, each at
 # the serial-tuned eta and at eta / (1 + tau).
-#   2 tasks x 3 tau x 2 step-size rules x 3 seeds = 36
+#   1 task x 3 tau x 2 step-size rules x 3 seeds = 18
+# (T3a was dropped on Nov 26: see the header of e1_scaling.yaml.)
 #
 # tau_inject is a target, not a guarantee: staleness is injected with a delay
 # queue (hogwild/instrument.py: DelayQueue) and the achieved value is whatever
@@ -11,11 +12,10 @@
 
 name: e2_injected_tau
 seeds: [0, 1, 2]
-expected_runs: 36
+expected_runs: 18
 
 grids:
   - base:
-      - configs/t3a_mnist_mlp.yaml
       - configs/t3b_cifar_cnn.yaml
     mode: [hogwild]
     m: [8]

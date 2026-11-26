@@ -86,7 +86,7 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 | --- | --------------------------- | ------------------------ | ------ | ------------------------ | ----------------------- |
 | T1  | RCV1 binary (CCAT vs. rest) | ℓ2-logistic regression   | 47k    | ~0.2%                    | serial loss @ 5 epochs  |
 | T2  | MNIST                       | softmax regression       | 7.8k   | 100%                     | serial loss @ 10 epochs |
-| T3a | MNIST                       | 2-layer MLP (256 hidden) | 0.2M   | 100%                     | serial loss @ 10 epochs |
+| T3a | MNIST (dropped Nov 26, §5)  | 2-layer MLP (256 hidden) | 0.2M   | 100%                     | serial loss @ 10 epochs |
 | T3b | CIFAR-10                    | 4-conv CNN               | 0.3M   | 100%                     | serial loss @ 20 epochs |
 
 "Target loss" is fixed per task from the serial run so that time-to-target is comparable across modes. Concretely it is the lowest per-epoch median serial test loss within the reference window, stored with the tuned η in `configs/reference.yaml`. Median per epoch because single points are noisy; lowest epoch rather than last because the CIFAR CNN overfits (its test loss bottoms out near epoch 9 and then rises, so "loss @ 20 epochs" would be crossed in the first epoch of every run). For T1, T2 and T3a the minimum is at or next to the last epoch, so this matches the table. T3b's target carries 10% slack on top (0.883 = 1.10 × 0.803): the bottom of an overfitting curve is a fragile target, and in the pilot HOGWILD! at m = 4 bottomed out just above the strict value and never crossed it. `configs/reference.yaml` keeps both numbers (`serial_best_loss`, `target_slack`). Every run gets 1.5× the reference epochs as its budget (T3b: 14 epochs, see `configs/t3b_cifar_cnn.yaml`), so a mode that is less efficient per epoch can still reach the target. Batch size is 1 for T1–T3a and 8 for T3b, per worker. T1 trains on the 781k-document part of RCV1 and tests on the 23k part, as in the HOGWILD! paper; its ℓ2 term uses Andrew's inverse-frequency scheme, where each example carries a share of the penalty for its own features, so the average is full ℓ2 while updates stay sparse (the share is capped at 1000 to keep batch-1 steps stable; see `tasks.Rcv1LogReg`).
@@ -119,11 +119,13 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 
 | Exp               | Tests  | Tasks            | Modes                                          | Sweep                           | Seeds     | Runs               |
 | ----------------- | ------ | ---------------- | ---------------------------------------------- | ------------------------------- | --------- | ------------------ |
-| **E1** scaling    | H1, H2 | T1, T2, T3a, T3b | serial; sync, backup(b=1), hogwild             | m ∈ {2, 4, 8, 16}               | 3         | 12 + 144 = **156** |
-| **E2** injected τ | H2     | T3a, T3b         | hogwild, m = 8                                 | τ ∈ {8, 32, 128} × {η, η/(1+τ)} | 3         | **36**             |
-| **E3** stragglers | H3     | T2, T3a          | sync, backup(b=1), backup(b=2), hogwild, m = 8 | tail ∈ {mild, heavy}            | 3         | **48**             |
-| **E4** step size  | H1     | T1–T3b           | sync, hogwild, m = 8                           | η ∈ {0.5×, 2×} of the mode's E1 step | 3    | **48**             |
-|                   |        |                  |                                                |                                 | **Total** | **≈ 290**          |
+| **E1** scaling    | H1, H2 | T1, T2, T3b      | serial; sync, backup(b=1), hogwild             | m ∈ {2, 4, 8, 16}               | 3         | 9 + 108 = **117**  |
+| **E2** injected τ | H2     | T3b              | hogwild, m = 8                                 | τ ∈ {8, 32, 128} × {η, η/(1+τ)} | 3         | **18**             |
+| **E3** stragglers | H3     | T2               | sync, backup(b=1), backup(b=2), hogwild, m = 8 | tail ∈ {mild, heavy}            | 3         | **24**             |
+| **E4** step size  | H1     | T1, T2, T3b      | sync, hogwild, m = 8                           | η ∈ {0.5×, 2×} of the mode's E1 step | 3    | **36**             |
+|                   |        |                  |                                                |                                 | **Total** | **195**            |
+
+**T3a was dropped from all four experiments on Nov 26**, after the full sweep (288 runs with it). Plain HOGWILD! on the MLP ran slower and needed more epochs than HOGWILD! with injected staleness (E2) or injected stragglers (E3), which we could not explain, so T3b is the only non-convex task and E3 has none. The 93 T3a rows are in `results/stale/` (moved by `scripts/archive_stale_rows.py`); the task and `configs/t3a_mnist_mlp.yaml` still run. The report has to say that T3a was run and excluded, and why.
 
 Runs take 1–5 min each on CPU. Sequential total ≈ 15 h; two sweeps in parallel on a 32-vCPU VM ≈ 8–10 h wall. **If time runs short, cut in this order:** E4 → m = 2 column of E1 → T3b from E3.
 

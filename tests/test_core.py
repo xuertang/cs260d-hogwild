@@ -107,7 +107,7 @@ def test_straggler_tail_ratio(kind, tail):
 # ---- sweeps ---------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("name, n", [("e1_scaling", 156), ("e2_injected_tau", 36), ("e3_stragglers", 48), ("e4_step_size", 48)])
+@pytest.mark.parametrize("name, n", [("e1_scaling", 117), ("e2_injected_tau", 18), ("e3_stragglers", 24), ("e4_step_size", 36)])
 def test_sweep_sizes_match_readme(name, n, monkeypatch):
     monkeypatch.chdir(REPO)
     configs = expand(f"configs/sweeps/{name}.yaml")

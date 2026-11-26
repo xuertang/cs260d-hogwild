@@ -66,7 +66,6 @@ Task & Model & Params & Train size & Batch & Target loss \\
 \midrule
 T1 RCV1 (CCAT vs.\ rest) & $\ell_2$-logistic regression & 47{,}236 & 781{,}265 & 1 & best serial epoch of 5 \\
 T2 MNIST & softmax regression & 7{,}850 & 60{,}000 & 1 & best serial epoch of 10 \\
-T3a MNIST & MLP, 256 hidden & 203{,}530 & 60{,}000 & 1 & best serial epoch of 10 \\
 T3b CIFAR-10 & 4-conv CNN & 316{,}554 & 50{,}000 & 8 & best serial epoch of 20, $+10\%$ \\
 \bottomrule
 \end{tabular}
@@ -178,7 +177,7 @@ gradients per task.}{fig:interference}
 \resizebox{\linewidth}{!}{\tab{table_bound_constants}}
 \caption{Constants used in the theory check.}\label{tab:bound}
 \end{table}
-% State plainly where the theorem's assumptions do not hold (T3a, T3b), that
+% State plainly where the theorem's assumptions do not hold (T3b), that
 % only the first term of the bound is estimated, and that the constant in the
 % O(.) is unknown, so the check is about scaling across tasks.
 
@@ -203,6 +202,12 @@ and spread of final test accuracy.}\label{tab:repro}
 % - Sync and backup use m times the serial step size (linear scaling, not
 %   re-tuned per m) with an m-times larger effective batch.
 % - Backup uses b more cores than the other modes at the same m.
+% - A fourth task was run and excluded: T3a, an MLP (784-256-10) on MNIST.
+%   Plain HOGWILD! on it was slower and less efficient per epoch than
+%   HOGWILD! with injected staleness or stragglers, which we could not
+%   explain. Consequences to state: T3b is the only non-convex task, there is
+%   no dense non-convex task with a cheap gradient, and E3 covers a convex
+%   task only (T2), so H3 is not tested on a non-convex model.
 
 % =========================================================================
 \section{Conclusion}  % owner: D
