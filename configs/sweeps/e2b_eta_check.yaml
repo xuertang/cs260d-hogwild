@@ -1,0 +1,29 @@
+# E2b — does a smaller constant step recover high staleness? Follow-up to E2.
+# Format: see the header of e1_scaling.yaml.
+#
+# E2's eta / (1 + tau) arm never reaches the target, but it cuts the step 33x
+# and 129x at tau = 32 and 128 inside an unchanged epoch budget, so those runs
+# are under-trained and say nothing about recovery. This fills in between:
+# T3b, hogwild, m = 8, at the two tau where the serial-tuned eta degrades
+# (32) or stalls (128), with eta at 1/2, 1/4 and 1/8 of the serial-tuned value
+# and the same 14-epoch budget.
+#   1 task x 2 tau x 3 eta x 3 seeds = 18
+#
+# The eta_mult = 1 point is not repeated: it is E2's `const` rows.
+#
+# Not part of scripts/run_all.sh. Write to a subdirectory so analysis/plots.py
+# (which reads only results/*.jsonl) does not pool these rows into the E2 figure:
+#   python -m hogwild.sweep configs/sweeps/e2b_eta_check.yaml --out results/extra/e2b.jsonl --parallel 2
+
+name: e2b_eta_check
+seeds: [0, 1, 2]
+expected_runs: 18
+
+grids:
+  - base:
+      - configs/t3b_cifar_cnn.yaml
+    mode: [hogwild]
+    m: [8]
+    tau_inject: [32, 128]
+    eta_scale: [const]
+    eta_mult: [0.5, 0.25, 0.125]
