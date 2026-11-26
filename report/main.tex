@@ -133,7 +133,8 @@ step size is $\eta/(1+K)$.
 
 \paragraph{Stragglers.}
 Each step is followed by a delay $c + \mathrm{Exp}(\lambda)$ with
-$c = 200\,\mu$s. The two settings fix the ratio of the 99.5th percentile to
+$c = 200\,\mu$s on T2 (about four of its gradient steps) and $c = 2.5$\,ms
+on T3b (about one). The two settings fix the ratio of the 99.5th percentile to
 the median at 2 (mild) and 6 (heavy).
 
 \paragraph{Interference.}
@@ -205,9 +206,10 @@ and spread of final test accuracy.}\label{tab:repro}
 % - A fourth task was run and excluded: T3a, an MLP (784-256-10) on MNIST.
 %   Plain HOGWILD! on it was slower and less efficient per epoch than
 %   HOGWILD! with injected staleness or stragglers, which we could not
-%   explain. Consequences to state: T3b is the only non-convex task, there is
-%   no dense non-convex task with a cheap gradient, and E3 covers a convex
-%   task only (T2), so H3 is not tested on a non-convex model.
+%   explain. Consequences to state: T3b is the only non-convex task and there
+%   is no dense non-convex task with a cheap gradient.
+% - E3: the injected delay is about four gradient steps on T2 and one on T3b,
+%   so times are comparable between modes within a task, not across tasks.
 
 % =========================================================================
 \section{Conclusion}  % owner: D

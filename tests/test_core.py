@@ -94,12 +94,13 @@ def test_first_crossing_interpolates():
     assert first_crossing(pts, float("nan")) == (math.inf, math.inf)
 
 
+@pytest.mark.parametrize("task, base", [("t2", 200e-6), ("t3b", 2.5e-3), ("t3b@val", 2.5e-3)])
 @pytest.mark.parametrize("kind, tail", [("mild", 2.0), ("heavy", 6.0)])
-def test_straggler_tail_ratio(kind, tail):
-    """p99.5 / median of the sampled delays matches the README's tail factor."""
-    sim = StragglerSim(kind, seed=0, worker_id=0)
-    from hogwild.instrument import STRAGGLER_BASE_S
-    d = STRAGGLER_BASE_S + sim.rng.exponential(sim.scale, size=400_000)
+def test_straggler_tail_ratio(kind, tail, task, base):
+    """p99.5 / median of the sampled delays matches the README's tail factor for every per-task c."""
+    sim = StragglerSim(kind, seed=0, worker_id=0, task=task)
+    assert sim.base == base
+    d = sim.base + sim.rng.exponential(sim.scale, size=400_000)
     d.sort()
     assert d[int(0.995 * len(d))] / d[len(d) // 2] == pytest.approx(tail, rel=0.03)
 
@@ -107,7 +108,7 @@ def test_straggler_tail_ratio(kind, tail):
 # ---- sweeps ---------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("name, n", [("e1_scaling", 117), ("e2_injected_tau", 18), ("e3_stragglers", 24), ("e4_step_size", 36)])
+@pytest.mark.parametrize("name, n", [("e1_scaling", 117), ("e2_injected_tau", 18), ("e3_stragglers", 48), ("e4_step_size", 36)])
 def test_sweep_sizes_match_readme(name, n, monkeypatch):
     monkeypatch.chdir(REPO)
     configs = expand(f"configs/sweeps/{name}.yaml")

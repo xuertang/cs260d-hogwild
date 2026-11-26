@@ -37,7 +37,7 @@ def hogwild_worker(worker_id: int, sh: Shared) -> dict:
     limit, batch_size = sh.example_limit, cfg.batch_size
     eta = effective_eta(cfg)
     hist = TauHistogram()
-    straggler = StragglerSim(cfg.straggler, cfg.seed, worker_id)
+    straggler = StragglerSim(cfg.straggler, cfg.seed, worker_id, cfg.task)
     delay = DelayQueue(cfg.tau_inject, sh.n_workers)
 
     epoch = 0

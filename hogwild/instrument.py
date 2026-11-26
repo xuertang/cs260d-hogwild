@@ -131,9 +131,20 @@ class DelayQueue:
 # Straggler simulation (E3)
 # --------------------------------------------------------------------------- #
 
-# c in seconds: the fixed part of the injected per-step delay. Same order as
-# one gradient step on T2/T3a, so a "none" run and a "mild" run stay comparable.
+# c in seconds: the fixed part of the injected per-step delay. 200 us is about
+# four gradient steps on T2 (50 us each on the sweep machine).
 STRAGGLER_BASE_S = 200e-6
+
+# Tasks whose gradient step is much longer than the default c get their own, or
+# the injected delay disappears next to the step itself. T3b: one step takes
+# about 2.5 ms at m = 8 (batch 8), so c is one step. c is NOT part of Config or
+# of the run_id: changing a value here invalidates that task's straggler rows.
+STRAGGLER_BASE_BY_TASK = {"t3b": 2.5e-3}
+
+
+def straggler_base_s(task: str = "") -> float:
+    """c for a task name (a "@val" suffix is ignored); the default for unlisted tasks."""
+    return STRAGGLER_BASE_BY_TASK.get(task.partition("@")[0], STRAGGLER_BASE_S)
 
 # s / c, where s = 1/lambda is the mean of the exponential part. Chosen so that
 # p99.5 / median of (c + Exp) equals the README's tail factor r:
@@ -151,18 +162,22 @@ class StragglerSim:
 
     Each worker has its own generator, seeded from (seed, worker_id): workers
     sharing a stream would all be slow at the same moments.
+
+    c depends on the task (straggler_base_s); the tail factor does not, because
+    the exponential part scales with c.
     """
 
-    def __init__(self, kind: str, seed: int, worker_id: int) -> None:
+    def __init__(self, kind: str, seed: int, worker_id: int, task: str = "") -> None:
         ratio = STRAGGLER_RATIO[kind]
         self.active = ratio is not None
-        self.scale = (ratio or 0.0) * STRAGGLER_BASE_S
+        self.base = straggler_base_s(task)
+        self.scale = (ratio or 0.0) * self.base
         self.rng = np.random.default_rng([seed, worker_id, 7919])
 
     def sleep(self) -> float:
         if not self.active:
             return 0.0
-        delay = STRAGGLER_BASE_S + self.rng.exponential(self.scale)
+        delay = self.base + self.rng.exponential(self.scale)
         deadline = time.perf_counter() + delay
         if delay > 2e-3:
             time.sleep(delay - 1e-3)

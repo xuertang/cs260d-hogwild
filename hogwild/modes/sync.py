@@ -52,7 +52,7 @@ def round_worker(worker_id: int, sh: Shared) -> dict:
     stop = sh.stop.numpy()
     quorum, batch_size = cfg.m, cfg.batch_size
     step = cfg.eta / quorum                        # average of the quorum's gradients
-    straggler = StragglerSim(cfg.straggler, cfg.seed, worker_id)
+    straggler = StragglerSim(cfg.straggler, cfg.seed, worker_id, cfg.task)
     updates = dropped = 0
 
     def finished() -> dict:

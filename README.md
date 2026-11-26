@@ -105,7 +105,7 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 
 - **τ per update**: shared int64 `version` tensor with one slot per worker (a worker only ever writes its own slot, so no increment is lost and nothing is locked; the version is the sum). Worker records `v_read` before reading params, `v_write` before its add, increments after. τ = v_write − v_read. Logged as a histogram per run.
 - **Injected τ**: a per-worker delay queue of ⌈K/m⌉ gradients. (Waiting for the counter to advance by K, as first planned, cannot run: while one worker waits at most m − 1 other updates land, so K ≥ m deadlocks.) The achieved τ is read from the histogram, not assumed. Sweeps τ past the core count.
-- **Straggler sim**: per-step delay `c + Exp(λ)` with c = 200 µs, busy-waited for precision; `mild` = tail 2× median, `heavy` = tail 6× median, with tail = 99.5th percentile (the measured 99.5-pct / max from Lecture 4).
+- **Straggler sim**: per-step delay `c + Exp(λ)` with c = 200 µs (2.5 ms on T3b, about one of its gradient steps), busy-waited for precision; `mild` = tail 2× median, `heavy` = tail 6× median, with tail = 99.5th percentile (the measured 99.5-pct / max from Lecture 4).
 - **Interference probe**: once per window of N = 200 updates, workers 0 and 1 dump their in-flight gradient; cosine logged. Dense stand-in for ρ.
 - **Evaluator**: main process snapshots shared params every 2 s wall-clock and every quarter epoch, evaluates test loss/acc. Gives both loss-vs-epoch and loss-vs-wall-clock curves from one run. Time-to-target is interpolated between the two snapshots around the crossing.
 
@@ -121,11 +121,11 @@ Every worker runs with `torch.set_num_threads(1)` and is pinned to one core; oth
 | ----------------- | ------ | ---------------- | ---------------------------------------------- | ------------------------------- | --------- | ------------------ |
 | **E1** scaling    | H1, H2 | T1, T2, T3b      | serial; sync, backup(b=1), hogwild             | m ∈ {2, 4, 8, 16}               | 3         | 9 + 108 = **117**  |
 | **E2** injected τ | H2     | T3b              | hogwild, m = 8                                 | τ ∈ {8, 32, 128} × {η, η/(1+τ)} | 3         | **18**             |
-| **E3** stragglers | H3     | T2               | sync, backup(b=1), backup(b=2), hogwild, m = 8 | tail ∈ {mild, heavy}            | 3         | **24**             |
+| **E3** stragglers | H3     | T2, T3b          | sync, backup(b=1), backup(b=2), hogwild, m = 8 | tail ∈ {mild, heavy}            | 3         | **48**             |
 | **E4** step size  | H1     | T1, T2, T3b      | sync, hogwild, m = 8                           | η ∈ {0.5×, 2×} of the mode's E1 step | 3    | **36**             |
-|                   |        |                  |                                                |                                 | **Total** | **195**            |
+|                   |        |                  |                                                |                                 | **Total** | **219**            |
 
-**T3a was dropped from all four experiments on Nov 26**, after the full sweep (288 runs with it). Plain HOGWILD! on the MLP ran slower and needed more epochs than HOGWILD! with injected staleness (E2) or injected stragglers (E3), which we could not explain, so T3b is the only non-convex task and E3 has none. The 93 T3a rows are in `results/stale/` (moved by `scripts/archive_stale_rows.py`); the task and `configs/t3a_mnist_mlp.yaml` still run. The report has to say that T3a was run and excluded, and why.
+**T3a was dropped from all four experiments on Nov 26**, after the full sweep (288 runs with it). Plain HOGWILD! on the MLP ran slower and needed more epochs than HOGWILD! with injected staleness (E2) or injected stragglers (E3), which we could not explain, so T3b is the only non-convex task; it replaced T3a in E3, with the injected delay scaled to its step time (§4). The 93 T3a rows are in `results/stale/` (moved by `scripts/archive_stale_rows.py`); the task and `configs/t3a_mnist_mlp.yaml` still run. The report has to say that T3a was run and excluded, and why.
 
 Runs take 1–5 min each on CPU. Sequential total ≈ 15 h; two sweeps in parallel on a 32-vCPU VM ≈ 8–10 h wall. **If time runs short, cut in this order:** E4 → m = 2 column of E1 → T3b from E3.
 

@@ -3,14 +3,15 @@
 #
 # sync, backup(b=1), backup(b=2) and hogwild at m = 8 under mild and heavy
 # worker-time tails.
-#   1 task x 4 mode variants x 2 tails x 3 seeds = 24
+#   2 tasks x 4 mode variants x 2 tails x 3 seeds = 48
 #
-# T2 only since Nov 26, when T3a was dropped (see the header of
-# e1_scaling.yaml), so E3 has no non-convex task. T3b is not a drop-in
-# replacement: the injected delay is c + Exp with c = 200 us
-# (hogwild/instrument.py), four times a T2 gradient step (about 50 us), and
-# a T3b step takes about 2.5 ms, so the same delay would add 10% (mild) to
-# 40% (heavy) to its step time instead of dominating it.
+# T3b replaced T3a here on Nov 26 (T3a was dropped: see the header of
+# e1_scaling.yaml). The injected delay is c + Exp, and c is per task
+# (hogwild/instrument.py: STRAGGLER_BASE_BY_TASK): 200 us on T2, about four of
+# its 50 us gradient steps, and 2.5 ms on T3b, about one of its steps. At
+# 200 us the delay would add only 10% (mild) to 40% (heavy) to a T3b step.
+# So the two panels share the tail factor but not the delay-to-step ratio:
+# compare modes within a task, not times across tasks.
 #
 # Note for the write-up: backup uses m + b = 9 or 10 processes against 8 for
 # sync and hogwild.
@@ -20,11 +21,12 @@
 
 name: e3_stragglers
 seeds: [0, 1, 2]
-expected_runs: 24
+expected_runs: 48
 
 grids:
   - base: &e3_tasks
       - configs/t2_mnist_softmax.yaml
+      - configs/t3b_cifar_cnn.yaml
     mode: [hogwild]
     m: [8]
     straggler: [mild, heavy]
